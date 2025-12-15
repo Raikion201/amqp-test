@@ -19,6 +19,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.Map;
 import java.util.HashMap;
+import java.util.List;
+import java.util.ArrayList;
 
 public class AmqpChannel {
     private static final Logger logger = LoggerFactory.getLogger(AmqpChannel.class);
@@ -30,6 +32,9 @@ public class AmqpChannel {
     private final ConcurrentMap<String, String> consumers;
     private int prefetchCount = 0;
     private boolean inTransaction = false;
+
+    // Transaction buffering
+    private final List<TransactionAction> transactionBuffer = new ArrayList<>();
 
     // Acknowledgement tracking
     private final AtomicLong deliveryTagGenerator = new AtomicLong(0);
@@ -78,6 +83,74 @@ public class AmqpChannel {
                 bodyBuffer.release();
                 bodyBuffer = null;
             }
+        }
+    }
+
+    /**
+     * Represents an action that is buffered during a transaction.
+     */
+    private interface TransactionAction {
+        void execute();
+    }
+
+    /**
+     * Publish action buffered during a transaction.
+     */
+    private class PublishAction implements TransactionAction {
+        final String vhost;
+        final com.amqp.security.User user;
+        final String exchangeName;
+        final String routingKey;
+        final Message message;
+
+        PublishAction(String vhost, com.amqp.security.User user, String exchangeName,
+                     String routingKey, Message message) {
+            this.vhost = vhost;
+            this.user = user;
+            this.exchangeName = exchangeName;
+            this.routingKey = routingKey;
+            this.message = message;
+        }
+
+        @Override
+        public void execute() {
+            broker.publishMessage(vhost, user, exchangeName, routingKey, message);
+        }
+    }
+
+    /**
+     * Acknowledgement action buffered during a transaction.
+     */
+    private class AckAction implements TransactionAction {
+        final long deliveryTag;
+        final boolean multiple;
+
+        AckAction(long deliveryTag, boolean multiple) {
+            this.deliveryTag = deliveryTag;
+            this.multiple = multiple;
+        }
+
+        @Override
+        public void execute() {
+            acknowledgeMessage(deliveryTag, multiple);
+        }
+    }
+
+    /**
+     * Reject action buffered during a transaction.
+     */
+    private class RejectAction implements TransactionAction {
+        final long deliveryTag;
+        final boolean requeue;
+
+        RejectAction(long deliveryTag, boolean requeue) {
+            this.deliveryTag = deliveryTag;
+            this.requeue = requeue;
+        }
+
+        @Override
+        public void execute() {
+            rejectMessage(deliveryTag, requeue);
         }
     }
     
@@ -682,6 +755,19 @@ public class AmqpChannel {
 
         logger.debug("Basic Ack: deliveryTag={}, multiple={}", deliveryTag, multiple);
 
+        // Buffer if in transaction, otherwise execute immediately
+        if (inTransaction) {
+            transactionBuffer.add(new AckAction(deliveryTag, multiple));
+            logger.debug("Buffered ack in transaction: deliveryTag={}, multiple={}", deliveryTag, multiple);
+        } else {
+            acknowledgeMessage(deliveryTag, multiple);
+        }
+    }
+
+    /**
+     * Acknowledge message(s). If multiple is true, acknowledges all messages up to and including deliveryTag.
+     */
+    private void acknowledgeMessage(long deliveryTag, boolean multiple) {
         if (multiple) {
             // Acknowledge all messages up to and including deliveryTag
             Map<Long, UnackedMessage> toRemove = new HashMap<>();
@@ -692,6 +778,7 @@ public class AmqpChannel {
             }
 
             for (Map.Entry<Long, UnackedMessage> entry : toRemove.entrySet()) {
+                unackedMessages.remove(entry.getKey());
                 acknowledgeMessage(entry.getKey(), entry.getValue());
             }
 
@@ -719,6 +806,16 @@ public class AmqpChannel {
 
         logger.debug("Basic Reject: deliveryTag={}, requeue={}", deliveryTag, requeue);
 
+        // Buffer if in transaction, otherwise execute immediately
+        if (inTransaction) {
+            transactionBuffer.add(new RejectAction(deliveryTag, requeue));
+            logger.debug("Buffered reject in transaction: deliveryTag={}, requeue={}", deliveryTag, requeue);
+        } else {
+            rejectMessage(deliveryTag, requeue);
+        }
+    }
+
+    private void rejectMessage(long deliveryTag, boolean requeue) {
         UnackedMessage unacked = unackedMessages.remove(deliveryTag);
         if (unacked != null) {
             if (requeue) {
@@ -900,17 +997,28 @@ public class AmqpChannel {
                 user = broker.getAuthenticationManager().getUser("guest");
             }
 
-            // Publish the message
-            broker.publishMessage(
-                connection.getVirtualHost(),
-                user,
-                ctx.exchangeName,
-                ctx.routingKey,
-                ctx.message
-            );
-
-            logger.info("Published message: exchange={}, routingKey={}, size={}",
-                       ctx.exchangeName, ctx.routingKey, ctx.message.getBody().length);
+            // Publish the message - buffer if in transaction, otherwise execute immediately
+            if (inTransaction) {
+                transactionBuffer.add(new PublishAction(
+                    connection.getVirtualHost(),
+                    user,
+                    ctx.exchangeName,
+                    ctx.routingKey,
+                    ctx.message
+                ));
+                logger.debug("Buffered publish in transaction: exchange={}, routingKey={}",
+                           ctx.exchangeName, ctx.routingKey);
+            } else {
+                broker.publishMessage(
+                    connection.getVirtualHost(),
+                    user,
+                    ctx.exchangeName,
+                    ctx.routingKey,
+                    ctx.message
+                );
+                logger.info("Published message: exchange={}, routingKey={}, size={}",
+                           ctx.exchangeName, ctx.routingKey, ctx.message.getBody().length);
+            }
         } catch (Exception e) {
             logger.error("Failed to publish message", e);
         } finally {
@@ -999,22 +1107,41 @@ public class AmqpChannel {
     
     public void txSelect() {
         inTransaction = true;
+        transactionBuffer.clear(); // Start with clean buffer
         logger.debug("Transaction started on channel {}", channelNumber);
     }
-    
+
     public void txCommit() {
         if (!inTransaction) {
             throw new IllegalStateException("No transaction in progress");
         }
+
+        // Execute all buffered actions
+        int actionCount = transactionBuffer.size();
+        for (TransactionAction action : transactionBuffer) {
+            try {
+                action.execute();
+            } catch (Exception e) {
+                logger.error("Error executing transaction action during commit", e);
+                // In AMQP, if any action fails during commit, the entire transaction should be rolled back
+                // For now, we log and continue, but a production implementation should handle this better
+            }
+        }
+
+        transactionBuffer.clear();
         inTransaction = false;
-        logger.debug("Transaction committed on channel {}", channelNumber);
+        logger.info("Transaction committed on channel {}: {} actions executed", channelNumber, actionCount);
     }
-    
+
     public void txRollback() {
         if (!inTransaction) {
             throw new IllegalStateException("No transaction in progress");
         }
+
+        // Discard all buffered actions
+        int actionCount = transactionBuffer.size();
+        transactionBuffer.clear();
         inTransaction = false;
-        logger.debug("Transaction rolled back on channel {}", channelNumber);
+        logger.info("Transaction rolled back on channel {}: {} actions discarded", channelNumber, actionCount);
     }
 }

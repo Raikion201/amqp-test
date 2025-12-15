@@ -53,11 +53,6 @@ public class AmqpBroker {
         logger.info("AMQP Broker initialized with authentication, virtual hosts, and message delivery");
     }
 
-    @Deprecated
-    private void initializeDefaultExchanges() {
-        // This method is deprecated - exchanges are now managed per virtual host
-    }
-    
     public synchronized Exchange declareExchange(String vhostName, User user, String name,
                                                Exchange.Type type, boolean durable,
                                                boolean autoDelete, boolean internal) {

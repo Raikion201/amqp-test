@@ -30,8 +30,14 @@ public class AmqpServerApplication {
             PersistenceManager persistenceManager = new PersistenceManager(databaseManager);
             
             AmqpBroker broker = new AmqpBroker(persistenceManager);
-            
-            AmqpServer server = new AmqpServer(config.port, broker);
+
+            AmqpServer server;
+            if (config.sslEnabled) {
+                logger.info("SSL/TLS enabled with cert: {}, key: {}", config.sslCertPath, config.sslKeyPath);
+                server = new AmqpServer(config.port, broker, true, config.sslCertPath, config.sslKeyPath);
+            } else {
+                server = new AmqpServer(config.port, broker);
+            }
             
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 logger.info("Shutting down AMQP Server...");
@@ -77,6 +83,18 @@ public class AmqpServerApplication {
                         config.databasePassword = args[++i];
                     }
                     break;
+                case "--ssl-cert":
+                    if (i + 1 < args.length) {
+                        config.sslCertPath = args[++i];
+                        config.sslEnabled = true;
+                    }
+                    break;
+                case "--ssl-key":
+                    if (i + 1 < args.length) {
+                        config.sslKeyPath = args[++i];
+                        config.sslEnabled = true;
+                    }
+                    break;
                 case "--help":
                     printUsage();
                     System.exit(0);
@@ -104,10 +122,13 @@ public class AmqpServerApplication {
         System.out.println("  --db-url URL          PostgreSQL JDBC URL (default: jdbc:postgresql://localhost:5432/amqp)");
         System.out.println("  --db-user USER        Database username (default: amqp)");
         System.out.println("  --db-password PASS    Database password (default: amqp)");
+        System.out.println("  --ssl-cert PATH       SSL certificate file path (enables SSL/TLS)");
+        System.out.println("  --ssl-key PATH        SSL private key file path (enables SSL/TLS)");
         System.out.println("  --help                Show this help message");
         System.out.println();
-        System.out.println("Example:");
+        System.out.println("Examples:");
         System.out.println("  java -jar amqp-server.jar --port 5673 --db-url jdbc:postgresql://db:5432/amqp");
+        System.out.println("  java -jar amqp-server.jar --ssl-cert /path/to/cert.pem --ssl-key /path/to/key.pem");
     }
     
     private static class AmqpServerConfig {
@@ -116,5 +137,8 @@ public class AmqpServerApplication {
         String databaseUrl = DEFAULT_DB_URL;
         String databaseUser = DEFAULT_DB_USER;
         String databasePassword = DEFAULT_DB_PASSWORD;
+        boolean sslEnabled = false;
+        String sslCertPath = null;
+        String sslKeyPath = null;
     }
 }

@@ -304,20 +304,25 @@ public class QuorumQueue extends Queue {
         logger.info("Shutting down quorum queue: {}", getName());
 
         if (electionTask != null) {
-            electionTask.cancel(false);
+            electionTask.cancel(true);
         }
         if (heartbeatTask != null) {
-            heartbeatTask.cancel(false);
+            heartbeatTask.cancel(true);
         }
 
-        electionScheduler.shutdown();
-        heartbeatScheduler.shutdown();
+        electionScheduler.shutdownNow();
+        heartbeatScheduler.shutdownNow();
 
         try {
-            electionScheduler.awaitTermination(5, TimeUnit.SECONDS);
-            heartbeatScheduler.awaitTermination(5, TimeUnit.SECONDS);
+            if (!electionScheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                logger.warn("Election scheduler did not terminate in time for queue: {}", getName());
+            }
+            if (!heartbeatScheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                logger.warn("Heartbeat scheduler did not terminate in time for queue: {}", getName());
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            logger.warn("Interrupted while shutting down quorum queue: {}", getName());
         }
     }
 
