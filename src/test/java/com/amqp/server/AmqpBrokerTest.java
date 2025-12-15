@@ -27,7 +27,8 @@ class AmqpBrokerTest {
 
     @BeforeEach
     void setUp() {
-        broker = new AmqpBroker(persistenceManager);
+        // Enable guest user for testing purposes
+        broker = new AmqpBroker(persistenceManager, true);
     }
 
     @Nested

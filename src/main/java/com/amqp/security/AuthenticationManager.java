@@ -12,10 +12,16 @@ public class AuthenticationManager {
 
     private final ConcurrentMap<String, User> users;
     private final ConcurrentMap<String, VirtualHost> virtualHosts;
+    private final boolean enableDefaultGuest;
 
     public AuthenticationManager() {
+        this(false); // Default: guest user DISABLED for security
+    }
+
+    public AuthenticationManager(boolean enableDefaultGuest) {
         this.users = new ConcurrentHashMap<>();
         this.virtualHosts = new ConcurrentHashMap<>();
+        this.enableDefaultGuest = enableDefaultGuest;
 
         initializeDefaults();
     }
@@ -25,19 +31,26 @@ public class AuthenticationManager {
         VirtualHost defaultVhost = new VirtualHost("/");
         virtualHosts.put("/", defaultVhost);
 
-        // Create default guest user with full permissions on default vhost
-        Set<String> guestTags = new HashSet<>();
-        guestTags.add("administrator");
-        String guestPasswordHash = PasswordHasher.hash("guest");
-        User guestUser = new User("guest", guestPasswordHash, guestTags);
+        if (enableDefaultGuest) {
+            // Create default guest user for development/testing
+            // NOTE: Guest has administrator privileges when enabled (for test compatibility)
+            // In production, guest should be DISABLED (default)
+            Set<String> guestTags = new HashSet<>();
+            guestTags.add("administrator"); // Full permissions for testing
+            String guestPasswordHash = PasswordHasher.hash("guest");
+            User guestUser = new User("guest", guestPasswordHash, guestTags);
 
-        // Grant full permissions on default vhost
-        VirtualHostPermissions fullPermissions = new VirtualHostPermissions(".*", ".*", ".*");
-        guestUser.setPermissions("/", fullPermissions);
+            // Grant full permissions on default vhost
+            VirtualHostPermissions fullPermissions = new VirtualHostPermissions(".*", ".*", ".*");
+            guestUser.setPermissions("/", fullPermissions);
 
-        users.put("guest", guestUser);
+            users.put("guest", guestUser);
 
-        logger.info("Initialized default guest user and '/' virtual host");
+            logger.warn("WARNING: Default guest user enabled with full administrator privileges. " +
+                       "This should ONLY be used for development/testing, NEVER in production!");
+        } else {
+            logger.info("Initialized '/' virtual host. Guest user is DISABLED (recommended for production).");
+        }
     }
 
     public User authenticate(String username, String password) {

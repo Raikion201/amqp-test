@@ -46,41 +46,47 @@ public class DatabaseManager {
             
             stmt.execute("""
                 CREATE TABLE IF NOT EXISTS exchanges (
-                    name VARCHAR(255) PRIMARY KEY,
+                    vhost VARCHAR(255) NOT NULL DEFAULT '/',
+                    name VARCHAR(255) NOT NULL,
                     type VARCHAR(50) NOT NULL,
                     durable BOOLEAN NOT NULL,
                     auto_delete BOOLEAN NOT NULL,
                     internal BOOLEAN NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (vhost, name)
                 )
                 """);
-            
+
             stmt.execute("""
                 CREATE TABLE IF NOT EXISTS queues (
-                    name VARCHAR(255) PRIMARY KEY,
+                    vhost VARCHAR(255) NOT NULL DEFAULT '/',
+                    name VARCHAR(255) NOT NULL,
                     durable BOOLEAN NOT NULL,
                     exclusive BOOLEAN NOT NULL,
                     auto_delete BOOLEAN NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (vhost, name)
                 )
                 """);
-            
+
             stmt.execute("""
                 CREATE TABLE IF NOT EXISTS bindings (
                     id SERIAL PRIMARY KEY,
+                    vhost VARCHAR(255) NOT NULL DEFAULT '/',
                     exchange_name VARCHAR(255) NOT NULL,
                     queue_name VARCHAR(255) NOT NULL,
                     routing_key VARCHAR(255) NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (exchange_name) REFERENCES exchanges(name) ON DELETE CASCADE,
-                    FOREIGN KEY (queue_name) REFERENCES queues(name) ON DELETE CASCADE,
-                    UNIQUE(exchange_name, queue_name, routing_key)
+                    FOREIGN KEY (vhost, exchange_name) REFERENCES exchanges(vhost, name) ON DELETE CASCADE,
+                    FOREIGN KEY (vhost, queue_name) REFERENCES queues(vhost, name) ON DELETE CASCADE,
+                    UNIQUE(vhost, exchange_name, queue_name, routing_key)
                 )
                 """);
-            
+
             stmt.execute("""
                 CREATE TABLE IF NOT EXISTS messages (
                     id BIGSERIAL PRIMARY KEY,
+                    vhost VARCHAR(255) NOT NULL DEFAULT '/',
                     queue_name VARCHAR(255) NOT NULL,
                     routing_key VARCHAR(255),
                     content_type VARCHAR(100),
@@ -99,7 +105,7 @@ public class DatabaseManager {
                     cluster_id VARCHAR(255),
                     body BYTEA,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (queue_name) REFERENCES queues(name) ON DELETE CASCADE
+                    FOREIGN KEY (vhost, queue_name) REFERENCES queues(vhost, name) ON DELETE CASCADE
                 )
                 """);
             

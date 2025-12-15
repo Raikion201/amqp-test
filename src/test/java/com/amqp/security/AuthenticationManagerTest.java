@@ -14,7 +14,8 @@ class AuthenticationManagerTest {
 
     @BeforeEach
     void setUp() {
-        authManager = new AuthenticationManager();
+        // Enable guest user for testing
+        authManager = new AuthenticationManager(true);
     }
 
     @Test
@@ -22,6 +23,8 @@ class AuthenticationManagerTest {
         User guest = authManager.authenticate("guest", "guest");
         assertThat(guest).isNotNull();
         assertThat(guest.getUsername()).isEqualTo("guest");
+        // Guest user has administrator permissions when enabled (for testing)
+        // In production, guest should be disabled by default
         assertThat(guest.isAdministrator()).isTrue();
     }
 
@@ -90,7 +93,12 @@ class AuthenticationManagerTest {
 
     @Test
     void testAdministratorHasAllPermissions() {
-        User admin = authManager.getUser("guest");
+        // Create a proper administrator user
+        Set<String> adminTags = new HashSet<>();
+        adminTags.add("administrator");
+        authManager.createUser("admin", "adminpass", adminTags);
+        User admin = authManager.getUser("admin");
+
         assertThat(authManager.authorize(admin, "/", Permission.CONFIGURE, "any.resource")).isTrue();
         assertThat(authManager.authorize(admin, "/", Permission.WRITE, "any.resource")).isTrue();
         assertThat(authManager.authorize(admin, "/", Permission.READ, "any.resource")).isTrue();

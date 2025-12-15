@@ -13,7 +13,27 @@ public class Exchange {
     private final boolean internal;
     private final ConcurrentMap<String, Set<String>> bindings; // routing key -> queue names
     private final ConcurrentMap<String, Set<String>> exchangeBindings; // routing key -> exchange names
+    private final List<BindingInfo> headersBindings; // For headers exchange
     private volatile String alternateExchange;
+
+    // Binding information for headers exchange
+    public static class BindingInfo {
+        private final String queueName;
+        private final Map<String, Object> arguments;
+
+        public BindingInfo(String queueName, Map<String, Object> arguments) {
+            this.queueName = queueName;
+            this.arguments = arguments != null ? new HashMap<>(arguments) : new HashMap<>();
+        }
+
+        public String getQueueName() {
+            return queueName;
+        }
+
+        public Map<String, Object> getArguments() {
+            return arguments;
+        }
+    }
 
     public Exchange(String name, Type type, boolean durable, boolean autoDelete, boolean internal) {
         this(name, type, durable, autoDelete, internal, null);
@@ -28,6 +48,7 @@ public class Exchange {
         this.internal = internal;
         this.bindings = new ConcurrentHashMap<>();
         this.exchangeBindings = new ConcurrentHashMap<>();
+        this.headersBindings = new ArrayList<>();
         this.alternateExchange = alternateExchange;
     }
     
@@ -64,17 +85,27 @@ public class Exchange {
     }
 
     public void addBinding(String routingKey, String queueName) {
-        bindings.computeIfAbsent(routingKey, k -> ConcurrentHashMap.newKeySet()).add(queueName);
+        addBinding(routingKey, queueName, null);
+    }
+
+    public void addBinding(String routingKey, String queueName, Map<String, Object> arguments) {
+        if (type == Type.HEADERS) {
+            // For headers exchange, store in headersBindings list
+            synchronized (headersBindings) {
+                headersBindings.add(new BindingInfo(queueName, arguments));
+            }
+        } else {
+            // For other exchanges, use regular bindings map
+            bindings.computeIfAbsent(routingKey, k -> ConcurrentHashMap.newKeySet()).add(queueName);
+        }
     }
     
     public void removeBinding(String routingKey, String queueName) {
-        Set<String> queues = bindings.get(routingKey);
-        if (queues != null) {
+        bindings.computeIfPresent(routingKey, (key, queues) -> {
             queues.remove(queueName);
-            if (queues.isEmpty()) {
-                bindings.remove(routingKey);
-            }
-        }
+            // Return null to remove the mapping if the set is now empty
+            return queues.isEmpty() ? null : queues;
+        });
     }
 
     /**
@@ -137,8 +168,10 @@ public class Exchange {
     }
     
     public List<String> route(String routingKey) {
-        Set<String> result = new HashSet<>();
-        
+        return route(routingKey, null);
+    }
+
+    public List<String> route(String routingKey, Message message) {
         switch (type) {
             case DIRECT:
                 return routeDirect(routingKey);
@@ -147,7 +180,7 @@ public class Exchange {
             case TOPIC:
                 return routeTopic(routingKey);
             case HEADERS:
-                return routeHeaders(routingKey);
+                return routeHeaders(message);
             default:
                 return new ArrayList<>();
         }
@@ -221,8 +254,92 @@ public class Exchange {
         }
     }
     
-    private List<String> routeHeaders(String routingKey) {
-        return new ArrayList<>();
+    private List<String> routeHeaders(Message message) {
+        Set<String> result = new HashSet<>();
+
+        if (message == null) {
+            return new ArrayList<>();
+        }
+
+        Map<String, Object> messageHeaders = message.getHeaders();
+        if (messageHeaders == null || messageHeaders.isEmpty()) {
+            messageHeaders = new HashMap<>();
+        }
+
+        synchronized (headersBindings) {
+            for (BindingInfo binding : headersBindings) {
+                if (matchesHeaders(messageHeaders, binding.getArguments())) {
+                    result.add(binding.getQueueName());
+                }
+            }
+        }
+
+        return new ArrayList<>(result);
+    }
+
+    private boolean matchesHeaders(Map<String, Object> messageHeaders, Map<String, Object> bindingArgs) {
+        if (bindingArgs == null || bindingArgs.isEmpty()) {
+            return true; // No criteria means match all
+        }
+
+        // Get x-match mode (default is "all")
+        String matchMode = "all";
+        if (bindingArgs.containsKey("x-match")) {
+            Object xMatch = bindingArgs.get("x-match");
+            if (xMatch != null) {
+                matchMode = xMatch.toString();
+            }
+        }
+
+        // Extract actual header criteria (excluding x-match)
+        Map<String, Object> criteria = new HashMap<>(bindingArgs);
+        criteria.remove("x-match");
+
+        if (criteria.isEmpty()) {
+            return true; // No criteria means match all
+        }
+
+        if ("any".equals(matchMode)) {
+            // ANY: At least one header must match
+            for (Map.Entry<String, Object> entry : criteria.entrySet()) {
+                String key = entry.getKey();
+                Object expectedValue = entry.getValue();
+
+                if (messageHeaders.containsKey(key)) {
+                    Object actualValue = messageHeaders.get(key);
+                    if (valuesEqual(expectedValue, actualValue)) {
+                        return true; // Found a match
+                    }
+                }
+            }
+            return false; // No matches found
+        } else {
+            // ALL (default): All headers must match
+            for (Map.Entry<String, Object> entry : criteria.entrySet()) {
+                String key = entry.getKey();
+                Object expectedValue = entry.getValue();
+
+                if (!messageHeaders.containsKey(key)) {
+                    return false; // Missing header
+                }
+
+                Object actualValue = messageHeaders.get(key);
+                if (!valuesEqual(expectedValue, actualValue)) {
+                    return false; // Value mismatch
+                }
+            }
+            return true; // All matched
+        }
+    }
+
+    private boolean valuesEqual(Object expected, Object actual) {
+        if (expected == null && actual == null) {
+            return true;
+        }
+        if (expected == null || actual == null) {
+            return false;
+        }
+        return expected.equals(actual);
     }
     
     public enum Type {

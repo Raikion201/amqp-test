@@ -123,6 +123,23 @@ public class HttpManagementServer {
             logger.debug("Management API request: {} {}", method, uri);
 
             try {
+                // Skip auth for health check and API root endpoints
+                if (!uri.startsWith("/api/health") && !uri.equals("/api") && !uri.equals("/")) {
+                    // Authenticate request using Basic Auth
+                    com.amqp.security.User user = authenticateRequest(request);
+                    if (user == null) {
+                        sendAuthenticationRequired(ctx);
+                        return;
+                    }
+
+                    // Check if user has administrator tag (required for management API)
+                    if (!user.getTags().contains("administrator") && !user.getTags().contains("management")) {
+                        sendJsonResponse(ctx, FORBIDDEN,
+                            Map.of("error", "User must have 'administrator' or 'management' tag to access management API"));
+                        return;
+                    }
+                }
+
                 Object response = routeRequest(method, uri, request);
                 sendJsonResponse(ctx, OK, response);
             } catch (IllegalArgumentException e) {
@@ -134,6 +151,45 @@ public class HttpManagementServer {
                 sendJsonResponse(ctx, INTERNAL_SERVER_ERROR,
                                Map.of("error", "Internal server error", "message", e.getMessage()));
             }
+        }
+
+        private com.amqp.security.User authenticateRequest(FullHttpRequest request) {
+            String authHeader = request.headers().get(HttpHeaderNames.AUTHORIZATION);
+            if (authHeader == null || !authHeader.startsWith("Basic ")) {
+                return null;
+            }
+
+            try {
+                // Decode Base64 Basic Auth credentials
+                String base64Credentials = authHeader.substring("Basic ".length());
+                String credentials = new String(Base64.getDecoder().decode(base64Credentials), StandardCharsets.UTF_8);
+                String[] parts = credentials.split(":", 2);
+
+                if (parts.length != 2) {
+                    return null;
+                }
+
+                String username = parts[0];
+                String password = parts[1];
+
+                // Authenticate via management API's authentication manager
+                return managementApi.getAuthenticationManager().authenticate(username, password);
+            } catch (Exception e) {
+                logger.warn("Failed to authenticate management API request", e);
+                return null;
+            }
+        }
+
+        private void sendAuthenticationRequired(ChannelHandlerContext ctx) {
+            FullHttpResponse response = new DefaultFullHttpResponse(
+                HTTP_1_1,
+                UNAUTHORIZED,
+                Unpooled.copiedBuffer("{\"error\":\"Authentication required\"}", CharsetUtil.UTF_8)
+            );
+            response.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json; charset=UTF-8");
+            response.headers().set(HttpHeaderNames.WWW_AUTHENTICATE, "Basic realm=\"AMQP Management API\"");
+            response.headers().set(HttpHeaderNames.CONTENT_LENGTH, response.content().readableBytes());
+            ctx.writeAndFlush(response).addListener(ChannelFutureListener.CLOSE);
         }
 
         private Object routeRequest(HttpMethod method, String uri, FullHttpRequest request) throws Exception {
@@ -283,7 +339,9 @@ public class HttpManagementServer {
 
                 response.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json; charset=UTF-8");
                 response.headers().set(HttpHeaderNames.CONTENT_LENGTH, content.length);
-                response.headers().set(HttpHeaderNames.ACCESS_CONTROL_ALLOW_ORIGIN, "*");
+                // SECURITY FIX: Remove wildcard CORS - only allow specific origins if needed
+                // For production, configure specific allowed origins via configuration
+                // response.headers().set(HttpHeaderNames.ACCESS_CONTROL_ALLOW_ORIGIN, configuredOrigin);
 
                 ctx.writeAndFlush(response).addListener(ChannelFutureListener.CLOSE);
             } catch (Exception e) {

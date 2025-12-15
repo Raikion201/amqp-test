@@ -3,6 +3,7 @@ package com.amqp.connection;
 import com.amqp.amqp.AmqpFrame;
 import com.amqp.amqp.AmqpMethod;
 import com.amqp.server.AmqpBroker;
+import com.amqp.security.User;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
@@ -12,23 +13,36 @@ import org.slf4j.LoggerFactory;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 public class AmqpConnection {
     private static final Logger logger = LoggerFactory.getLogger(AmqpConnection.class);
-    
+
     private final Channel nettyChannel;
     private final AmqpBroker broker;
     private final ConcurrentMap<Short, AmqpChannel> channels;
     private final AtomicBoolean connected;
+    private final AtomicBoolean authenticated;
     private volatile String virtualHost = "/";
     private volatile String username;
+    private volatile User user;
+
+    // Heartbeat tracking
+    private volatile int heartbeatInterval = 0; // seconds, 0 = disabled
+    private final AtomicLong lastHeartbeatReceived = new AtomicLong(System.currentTimeMillis());
+    private volatile ScheduledFuture<?> heartbeatSender;
+    private volatile ScheduledFuture<?> heartbeatMonitor;
     
     public AmqpConnection(Channel nettyChannel, AmqpBroker broker) {
         this.nettyChannel = nettyChannel;
         this.broker = broker;
         this.channels = new ConcurrentHashMap<>();
         this.connected = new AtomicBoolean(false);
-        
+        this.authenticated = new AtomicBoolean(false);
+
         AmqpChannel mainChannel = new AmqpChannel((short) 0, this, broker);
         channels.put((short) 0, mainChannel);
     }
@@ -78,27 +92,39 @@ public class AmqpConnection {
     
     public void sendMethod(short channelNumber, short classId, short methodId, ByteBuf payload) {
         ByteBuf methodFrame = Unpooled.buffer();
-        methodFrame.writeShort(classId);
-        methodFrame.writeShort(methodId);
-        if (payload != null) {
-            methodFrame.writeBytes(payload);
+        try {
+            methodFrame.writeShort(classId);
+            methodFrame.writeShort(methodId);
+            if (payload != null) {
+                methodFrame.writeBytes(payload);
+                payload.release(); // Release input buffer after copying
+            }
+
+            AmqpFrame frame = new AmqpFrame(AmqpFrame.FrameType.METHOD.getValue(), channelNumber, methodFrame);
+            sendFrame(frame);
+        } catch (Exception e) {
+            methodFrame.release(); // Release on error
+            throw e;
         }
-        
-        AmqpFrame frame = new AmqpFrame(AmqpFrame.FrameType.METHOD.getValue(), channelNumber, methodFrame);
-        sendFrame(frame);
     }
-    
+
     public void sendContentHeader(short channelNumber, short classId, long bodySize, ByteBuf properties) {
         ByteBuf headerFrame = Unpooled.buffer();
-        headerFrame.writeShort(classId);
-        headerFrame.writeShort(0);
-        headerFrame.writeLong(bodySize);
-        if (properties != null) {
-            headerFrame.writeBytes(properties);
+        try {
+            headerFrame.writeShort(classId);
+            headerFrame.writeShort(0);
+            headerFrame.writeLong(bodySize);
+            if (properties != null) {
+                headerFrame.writeBytes(properties);
+                properties.release(); // Release input buffer after copying
+            }
+
+            AmqpFrame frame = new AmqpFrame(AmqpFrame.FrameType.HEADER.getValue(), channelNumber, headerFrame);
+            sendFrame(frame);
+        } catch (Exception e) {
+            headerFrame.release(); // Release on error
+            throw e;
         }
-        
-        AmqpFrame frame = new AmqpFrame(AmqpFrame.FrameType.HEADER.getValue(), channelNumber, headerFrame);
-        sendFrame(frame);
     }
     
     public void sendContentBody(short channelNumber, ByteBuf body) {
@@ -108,16 +134,19 @@ public class AmqpConnection {
     
     public void close() {
         connected.set(false);
-        
+
+        // Stop heartbeat monitoring and sending
+        stopHeartbeat();
+
         for (AmqpChannel channel : channels.values()) {
             channel.close();
         }
         channels.clear();
-        
+
         if (nettyChannel.isActive()) {
             nettyChannel.close();
         }
-        
+
         logger.info("Connection closed");
     }
     
@@ -140,12 +169,111 @@ public class AmqpConnection {
     public String getUsername() {
         return username;
     }
-    
+
     public void setUsername(String username) {
         this.username = username;
     }
-    
+
+    public User getUser() {
+        return user;
+    }
+
+    public void setUser(User user) {
+        this.user = user;
+        if (user != null) {
+            this.username = user.getUsername();
+            this.authenticated.set(true);
+        }
+    }
+
+    public boolean isAuthenticated() {
+        return authenticated.get();
+    }
+
     public AmqpBroker getBroker() {
         return broker;
+    }
+
+    public AmqpChannel getChannel(short channelNumber) {
+        return channels.get(channelNumber);
+    }
+
+    /**
+     * Start heartbeat monitoring and sending based on negotiated interval.
+     * @param intervalSeconds Heartbeat interval in seconds (0 = disabled)
+     * @param scheduler ScheduledExecutorService for heartbeat tasks
+     */
+    public void startHeartbeat(int intervalSeconds, ScheduledExecutorService scheduler) {
+        if (intervalSeconds <= 0) {
+            logger.debug("Heartbeat disabled (interval=0)");
+            return;
+        }
+
+        this.heartbeatInterval = intervalSeconds;
+        lastHeartbeatReceived.set(System.currentTimeMillis());
+
+        // Send heartbeat frames at the negotiated interval
+        heartbeatSender = scheduler.scheduleAtFixedRate(() -> {
+            try {
+                if (isConnected()) {
+                    sendHeartbeat();
+                }
+            } catch (Exception e) {
+                logger.error("Error sending heartbeat", e);
+            }
+        }, intervalSeconds, intervalSeconds, TimeUnit.SECONDS);
+
+        // Monitor for missed heartbeats (close if no heartbeat received in 2x interval)
+        heartbeatMonitor = scheduler.scheduleAtFixedRate(() -> {
+            try {
+                if (isConnected()) {
+                    long timeSinceLastHeartbeat = System.currentTimeMillis() - lastHeartbeatReceived.get();
+                    long timeoutMs = intervalSeconds * 2000L; // 2x interval
+
+                    if (timeSinceLastHeartbeat > timeoutMs) {
+                        logger.warn("Connection heartbeat timeout: no heartbeat received for {}ms (limit: {}ms)",
+                                  timeSinceLastHeartbeat, timeoutMs);
+                        close();
+                    }
+                }
+            } catch (Exception e) {
+                logger.error("Error monitoring heartbeat", e);
+            }
+        }, intervalSeconds, intervalSeconds, TimeUnit.SECONDS);
+
+        logger.info("Heartbeat started: interval={}s", intervalSeconds);
+    }
+
+    /**
+     * Stop heartbeat monitoring and sending.
+     */
+    public void stopHeartbeat() {
+        if (heartbeatSender != null) {
+            heartbeatSender.cancel(false);
+            heartbeatSender = null;
+        }
+        if (heartbeatMonitor != null) {
+            heartbeatMonitor.cancel(false);
+            heartbeatMonitor = null;
+        }
+        logger.debug("Heartbeat stopped");
+    }
+
+    /**
+     * Send a heartbeat frame to the client.
+     */
+    private void sendHeartbeat() {
+        ByteBuf emptyPayload = Unpooled.EMPTY_BUFFER;
+        AmqpFrame heartbeatFrame = new AmqpFrame(AmqpFrame.FrameType.HEARTBEAT.getValue(), (short) 0, emptyPayload);
+        sendFrame(heartbeatFrame);
+        logger.trace("Sent heartbeat frame");
+    }
+
+    /**
+     * Record that a heartbeat was received from the client.
+     */
+    public void recordHeartbeatReceived() {
+        lastHeartbeatReceived.set(System.currentTimeMillis());
+        logger.trace("Received heartbeat from client");
     }
 }

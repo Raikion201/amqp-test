@@ -27,9 +27,12 @@ public class AmqpServer {
     }
     
     public void start() throws InterruptedException {
+        // Start the broker's message delivery service
+        broker.start();
+
         bossGroup = new NioEventLoopGroup(1);
         workerGroup = new NioEventLoopGroup();
-        
+
         try {
             ServerBootstrap b = new ServerBootstrap();
             b.group(bossGroup, workerGroup)
@@ -45,20 +48,22 @@ public class AmqpServer {
                      pipeline.addLast("connectionHandler", new AmqpConnectionHandler(broker));
                  }
              });
-            
+
             ChannelFuture f = b.bind(port).sync();
             serverChannel = f.channel();
-            
+
             logger.info("AMQP Server started on port {}", port);
-            
+
             f.channel().closeFuture().sync();
         } finally {
+            broker.stop();
             bossGroup.shutdownGracefully();
             workerGroup.shutdownGracefully();
         }
     }
     
     public void stop() {
+        broker.stop();
         if (serverChannel != null) {
             serverChannel.close();
         }

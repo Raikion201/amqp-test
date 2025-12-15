@@ -135,7 +135,14 @@ public class VirtualHost {
     }
 
     public Queue removeQueue(String name) {
-        return queues.remove(name);
+        Queue queue = queues.remove(name);
+
+        // Properly cleanup QuorumQueue schedulers
+        if (queue instanceof com.amqp.queue.QuorumQueue) {
+            ((com.amqp.queue.QuorumQueue) queue).shutdown();
+        }
+
+        return queue;
     }
 
     public List<Queue> getAllQueues() {

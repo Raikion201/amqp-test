@@ -20,11 +20,12 @@ public class FlowControl {
     private final AtomicBoolean channelFlowActive = new AtomicBoolean(true);
     private final AtomicLong memoryUsed = new AtomicLong(0);
 
-    private long memoryHighWatermark = DEFAULT_MEMORY_HIGH_WATERMARK;
-    private long memoryLowWatermark = DEFAULT_MEMORY_LOW_WATERMARK;
-    private long diskFreeLimit = DEFAULT_DISK_FREE_LIMIT;
+    // Use volatile for thread-safe visibility of configuration changes
+    private volatile long memoryHighWatermark = DEFAULT_MEMORY_HIGH_WATERMARK;
+    private volatile long memoryLowWatermark = DEFAULT_MEMORY_LOW_WATERMARK;
+    private volatile long diskFreeLimit = DEFAULT_DISK_FREE_LIMIT;
 
-    private FlowControlListener listener;
+    private volatile FlowControlListener listener;
 
     public interface FlowControlListener {
         void onConnectionBlocked(String reason);

@@ -31,6 +31,10 @@ public class ManagementApi {
         this.statistics = new Statistics();
     }
 
+    public AuthenticationManager getAuthenticationManager() {
+        return authManager;
+    }
+
     // Overview
     public Map<String, Object> getOverview() {
         Map<String, Object> overview = new HashMap<>();
