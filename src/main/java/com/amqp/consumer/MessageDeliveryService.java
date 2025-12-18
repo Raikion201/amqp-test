@@ -69,14 +69,14 @@ public class MessageDeliveryService {
     /**
      * Start delivering messages from a queue to its consumers.
      */
-    public void startDelivery(Queue queue, AmqpConnection connection) {
+    public void startDelivery(Queue queue) {
         if (!running.get()) {
             return;
         }
 
         String queueName = queue.getName();
         queueWorkers.computeIfAbsent(queueName, k -> {
-            DeliveryWorker worker = new DeliveryWorker(queue, connection);
+            DeliveryWorker worker = new DeliveryWorker(queue);
             worker.start();
             return worker;
         });
@@ -107,14 +107,12 @@ public class MessageDeliveryService {
      */
     private class DeliveryWorker implements Runnable {
         private final Queue queue;
-        private final AmqpConnection connection;
         private final AtomicBoolean active = new AtomicBoolean(false);
         private final AtomicLong deliveryTag = new AtomicLong(0);
         private ScheduledFuture<?> scheduledFuture;
 
-        DeliveryWorker(Queue queue, AmqpConnection connection) {
+        DeliveryWorker(Queue queue) {
             this.queue = queue;
-            this.connection = connection;
         }
 
         void start() {
@@ -126,7 +124,7 @@ public class MessageDeliveryService {
                     10,
                     TimeUnit.MILLISECONDS
                 );
-                logger.debug("Started delivery worker for queue: {}", queue.getName());
+                logger.info("Started delivery worker for queue: {}", queue.getName());
             }
         }
 
@@ -159,19 +157,41 @@ public class MessageDeliveryService {
 
         private void deliverMessages() {
             Set<ConsumerManager.Consumer> consumers = consumerManager.getConsumersForQueue(queue.getName());
+            logger.debug("deliverMessages: queue={}, consumers={}", queue.getName(), consumers.size());
 
             if (consumers.isEmpty()) {
                 return; // No consumers, skip
             }
 
+            int queueSize = queue.size();
+            if (queueSize == 0) {
+                return; // No messages
+            }
+
+            logger.debug("Delivering messages: queue={}, consumers={}, queueSize={}",
+                        queue.getName(), consumers.size(), queueSize);
+
             // Deliver messages in round-robin fashion to active consumers
             for (ConsumerManager.Consumer consumer : consumers) {
                 if (!consumer.isActive()) {
+                    logger.debug("Consumer {} is not active, skipping", consumer.getConsumerTag());
                     continue;
                 }
 
-                // Check prefetch limit (simplified - should track per-channel)
-                // For now, just deliver one message at a time
+                // Check prefetch limit per channel
+                AmqpConnection consumerConnection = (AmqpConnection) consumer.getConnection();
+                if (consumerConnection != null && !consumer.isNoAck()) {
+                    com.amqp.connection.AmqpChannel channel = consumerConnection.getChannel(consumer.getChannelNumber());
+                    if (channel != null) {
+                        int prefetchCount = channel.getPrefetchCount();
+                        int unackedCount = channel.getUnackedMessageCount();
+                        if (prefetchCount > 0 && unackedCount >= prefetchCount) {
+                            logger.debug("Prefetch limit reached for consumer {}: unacked={}, prefetch={}",
+                                       consumer.getConsumerTag(), unackedCount, prefetchCount);
+                            continue; // Skip this consumer - at prefetch limit
+                        }
+                    }
+                }
 
                 Message message = queue.dequeue();
                 if (message == null) {
@@ -180,6 +200,7 @@ public class MessageDeliveryService {
 
                 try {
                     long tag = deliveryTag.incrementAndGet();
+                    logger.debug("Delivering message to consumer: {}, tag: {}", consumer.getConsumerTag(), tag);
                     deliverMessage(consumer, message, tag);
                 } catch (Exception e) {
                     logger.error("Failed to deliver message to consumer: {}", consumer.getConsumerTag(), e);
@@ -190,16 +211,21 @@ public class MessageDeliveryService {
         }
 
         private void deliverMessage(ConsumerManager.Consumer consumer, Message message, long workerDeliveryTag) {
-            logger.debug("Delivering message to consumer: {}, workerDeliveryTag: {}",
-                        consumer.getConsumerTag(), workerDeliveryTag);
+            // Get the connection for this specific consumer
+            AmqpConnection consumerConnection = (AmqpConnection) consumer.getConnection();
+            if (consumerConnection == null) {
+                logger.warn("Connection not found for consumer: {}", consumer.getConsumerTag());
+                queue.enqueue(message);
+                return;
+            }
 
             // Track delivery in the channel if not in noAck mode
             long channelDeliveryTag = workerDeliveryTag; // Default for noAck
             if (!consumer.isNoAck()) {
-                com.amqp.connection.AmqpChannel channel = connection.getChannel(consumer.getChannelNumber());
+                com.amqp.connection.AmqpChannel channel = consumerConnection.getChannel(consumer.getChannelNumber());
                 if (channel != null) {
                     channelDeliveryTag = channel.trackDelivery(
-                        message, queue.getName(), connection.getVirtualHost(), false
+                        message, queue.getName(), consumerConnection.getVirtualHost(), false
                     );
                 } else {
                     logger.warn("Channel not found for consumer: {}", consumer.getConsumerTag());
@@ -209,17 +235,21 @@ public class MessageDeliveryService {
                 }
             }
 
-            // Build Basic.Deliver frame
-            ByteBuf deliverPayload = Unpooled.buffer();
+            try {
+                // Synchronize on the connection to prevent frame interleaving
+                // Each message must be sent atomically: METHOD → HEADER → BODY
+                synchronized (consumerConnection) {
+                    // Build Basic.Deliver frame
+                    ByteBuf deliverPayload = Unpooled.buffer();
 
-            // Basic.Deliver method: class=60, method=60
-            AmqpCodec.encodeShortString(deliverPayload, consumer.getConsumerTag());
-            deliverPayload.writeLong(channelDeliveryTag); // Use channel's delivery tag
-            AmqpCodec.encodeBoolean(deliverPayload, false); // redelivered
-            AmqpCodec.encodeShortString(deliverPayload, ""); // exchange (not stored in message)
-            AmqpCodec.encodeShortString(deliverPayload, message.getRoutingKey() != null ? message.getRoutingKey() : "");
+                    // Basic.Deliver method: class=60, method=60
+                    AmqpCodec.encodeShortString(deliverPayload, consumer.getConsumerTag());
+                    deliverPayload.writeLong(channelDeliveryTag); // Use channel's delivery tag
+                    AmqpCodec.encodeBoolean(deliverPayload, false); // redelivered
+                    AmqpCodec.encodeShortString(deliverPayload, ""); // exchange (not stored in message)
+                    AmqpCodec.encodeShortString(deliverPayload, message.getRoutingKey() != null ? message.getRoutingKey() : "");
 
-            connection.sendMethod(consumer.getChannelNumber(), (short) 60, (short) 60, deliverPayload);
+                    consumerConnection.sendMethod(consumer.getChannelNumber(), (short) 60, (short) 60, deliverPayload);
 
             // Send Content Header
             long bodySize = message.getBody() != null ? message.getBody().length : 0;
@@ -284,16 +314,22 @@ public class MessageDeliveryService {
                 AmqpCodec.encodeShortString(headerPayload, message.getAppId());
             }
 
-            connection.sendContentHeader(consumer.getChannelNumber(), (short) 60, bodySize, headerPayload);
+            consumerConnection.sendContentHeader(consumer.getChannelNumber(), (short) 60, bodySize, headerPayload);
 
             // Send Content Body
             if (message.getBody() != null && message.getBody().length > 0) {
                 ByteBuf bodyBuf = Unpooled.wrappedBuffer(message.getBody());
-                connection.sendContentBody(consumer.getChannelNumber(), bodyBuf);
+                consumerConnection.sendContentBody(consumer.getChannelNumber(), bodyBuf);
             }
 
-            logger.debug("Message delivered to consumer: {}, deliveryTag: {}, noAck: {}",
-                       consumer.getConsumerTag(), channelDeliveryTag, consumer.isNoAck());
+            logger.debug("Message delivered to consumer: {}, deliveryTag: {}",
+                       consumer.getConsumerTag(), channelDeliveryTag);
+                } // End synchronized
+            } catch (Exception e) {
+                logger.error("Exception while delivering message to consumer: {}", consumer.getConsumerTag(), e);
+                // Re-queue the message
+                queue.enqueue(message);
+            }
         }
     }
 }

@@ -109,6 +109,20 @@ public class Exchange {
     }
 
     /**
+     * Remove all bindings to a specific queue (used when deleting a queue).
+     */
+    public void removeAllBindingsToQueue(String queueName) {
+        // Remove from regular bindings
+        bindings.forEach((routingKey, queues) -> queues.remove(queueName));
+        bindings.entrySet().removeIf(entry -> entry.getValue().isEmpty());
+
+        // Remove from headers bindings
+        synchronized (headersBindings) {
+            headersBindings.removeIf(binding -> queueName.equals(binding.queueName));
+        }
+    }
+
+    /**
      * Add an exchange-to-exchange binding.
      */
     public void addExchangeBinding(String routingKey, String exchangeName) {

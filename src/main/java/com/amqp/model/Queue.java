@@ -62,6 +62,13 @@ public class Queue {
     public void purge() {
         messages.clear();
     }
+
+    /**
+     * Clear all messages from the queue (alias for purge).
+     */
+    public void clear() {
+        messages.clear();
+    }
     
     @Override
     public String toString() {

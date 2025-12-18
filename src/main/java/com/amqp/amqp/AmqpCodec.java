@@ -4,6 +4,8 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.ByteToMessageDecoder;
 import io.netty.handler.codec.MessageToByteEncoder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 
@@ -42,9 +44,11 @@ public class AmqpCodec {
     }
     
     public static class AmqpFrameEncoder extends MessageToByteEncoder<AmqpFrame> {
-        
+        private static final Logger logger = LoggerFactory.getLogger(AmqpFrameEncoder.class);
+
         @Override
         protected void encode(ChannelHandlerContext ctx, AmqpFrame frame, ByteBuf out) throws Exception {
+            logger.debug("Encoding frame: type={}, channel={}, size={}", frame.getType(), frame.getChannel(), frame.getSize());
             out.writeByte(frame.getType());
             out.writeShort(frame.getChannel());
             out.writeInt(frame.getSize());
@@ -57,24 +61,29 @@ public class AmqpCodec {
         private static final byte[] AMQP_PROTOCOL_HEADER = {
             'A', 'M', 'Q', 'P', 0, 0, 9, 1
         };
-        
+
         @Override
         protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
             if (in.readableBytes() < 8) {
                 return;
             }
-            
+
             byte[] header = new byte[8];
             in.readBytes(header);
-            
+
             for (int i = 0; i < 8; i++) {
                 if (header[i] != AMQP_PROTOCOL_HEADER[i]) {
                     throw new IllegalArgumentException("Invalid AMQP protocol header");
                 }
             }
-            
+
+            // Replace this decoder with the frame decoder
+            ctx.pipeline().addAfter(ctx.name(), "frameDecoder", new AmqpFrameDecoder());
             ctx.pipeline().remove(this);
-            ctx.pipeline().addLast(new AmqpFrameDecoder());
+
+            // Fire event to notify that protocol header was received successfully
+            // This signals the connection handler to send Connection.Start
+            ctx.fireUserEventTriggered(ProtocolHeaderReceivedEvent.INSTANCE);
         }
     }
     

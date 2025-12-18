@@ -22,9 +22,11 @@ public class ConsumerManager {
         private final Map<String, Object> arguments;
         private final long createdAt;
         private volatile boolean active;
+        private final Object connection; // Reference to AmqpConnection (stored as Object to avoid circular dependency)
 
         public Consumer(String consumerTag, String queueName, short channelNumber,
-                       boolean noAck, boolean exclusive, Map<String, Object> arguments) {
+                       boolean noAck, boolean exclusive, Map<String, Object> arguments,
+                       Object connection) {
             this.consumerTag = consumerTag;
             this.queueName = queueName;
             this.channelNumber = channelNumber;
@@ -33,6 +35,7 @@ public class ConsumerManager {
             this.arguments = arguments != null ? new HashMap<>(arguments) : new HashMap<>();
             this.createdAt = System.currentTimeMillis();
             this.active = true;
+            this.connection = connection;
         }
 
         public String getConsumerTag() {
@@ -71,6 +74,10 @@ public class ConsumerManager {
             this.active = active;
         }
 
+        public Object getConnection() {
+            return connection;
+        }
+
         @Override
         public String toString() {
             return String.format("Consumer{tag='%s', queue='%s', channel=%d, exclusive=%s}",
@@ -79,7 +86,8 @@ public class ConsumerManager {
     }
 
     public Consumer addConsumer(String consumerTag, String queueName, short channelNumber,
-                               boolean noAck, boolean exclusive, Map<String, Object> arguments) {
+                               boolean noAck, boolean exclusive, Map<String, Object> arguments,
+                               Object connection) {
         // Check if queue already has exclusive consumer
         Set<String> existingConsumers = queueConsumers.get(queueName);
         if (existingConsumers != null) {
@@ -95,7 +103,7 @@ public class ConsumerManager {
             throw new IllegalStateException("Cannot create exclusive consumer - queue already has consumers: " + queueName);
         }
 
-        Consumer consumer = new Consumer(consumerTag, queueName, channelNumber, noAck, exclusive, arguments);
+        Consumer consumer = new Consumer(consumerTag, queueName, channelNumber, noAck, exclusive, arguments, connection);
         consumers.put(consumerTag, consumer);
 
         queueConsumers.computeIfAbsent(queueName, k -> ConcurrentHashMap.newKeySet()).add(consumerTag);
@@ -179,6 +187,26 @@ public class ConsumerManager {
     public int getConsumerCountForQueue(String queueName) {
         Set<String> tags = queueConsumers.get(queueName);
         return tags != null ? tags.size() : 0;
+    }
+
+    /**
+     * Check if a queue has any active consumers.
+     */
+    public boolean hasConsumersForQueue(String queueName) {
+        Set<String> tags = queueConsumers.get(queueName);
+        return tags != null && !tags.isEmpty();
+    }
+
+    /**
+     * Remove all consumers for a queue.
+     */
+    public void removeConsumersForQueue(String queueName) {
+        Set<String> tags = queueConsumers.get(queueName);
+        if (tags != null) {
+            for (String tag : new ArrayList<>(tags)) {
+                removeConsumer(tag);
+            }
+        }
     }
 
     public interface CancelListener {

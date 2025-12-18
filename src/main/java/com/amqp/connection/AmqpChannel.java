@@ -207,6 +207,9 @@ public class AmqpChannel {
             case AmqpConstants.CLASS_BASIC:
                 handleBasicMethod(methodId, payload);
                 break;
+            case AmqpConstants.CLASS_TX:
+                handleTxMethod(methodId, payload);
+                break;
             default:
                 logger.warn("Unknown class ID: {}", classId);
         }
@@ -259,19 +262,68 @@ public class AmqpChannel {
             case AmqpConstants.METHOD_QUEUE_BIND:
                 handleQueueBind(payload);
                 break;
+            case AmqpConstants.METHOD_QUEUE_UNBIND:
+                handleQueueUnbind(payload);
+                break;
+            case AmqpConstants.METHOD_QUEUE_PURGE:
+                handleQueuePurge(payload);
+                break;
             case AmqpConstants.METHOD_QUEUE_DELETE:
                 handleQueueDelete(payload);
                 break;
         }
     }
+
+    private void handleTxMethod(short methodId, ByteBuf payload) {
+        switch (methodId) {
+            case AmqpConstants.METHOD_TX_SELECT:
+                handleTxSelect(payload);
+                break;
+            case AmqpConstants.METHOD_TX_COMMIT:
+                handleTxCommit(payload);
+                break;
+            case AmqpConstants.METHOD_TX_ROLLBACK:
+                handleTxRollback(payload);
+                break;
+            default:
+                logger.warn("Unknown TX method: {}", methodId);
+        }
+    }
+
+    private void handleTxSelect(ByteBuf payload) {
+        logger.debug("Tx Select on channel {}", channelNumber);
+        txSelect();
+        // Send Tx.Select-Ok
+        connection.sendMethod(channelNumber, AmqpConstants.CLASS_TX, AmqpConstants.METHOD_TX_SELECT_OK, null);
+    }
+
+    private void handleTxCommit(ByteBuf payload) {
+        logger.debug("Tx Commit on channel {}", channelNumber);
+        txCommit();
+        // Send Tx.Commit-Ok
+        connection.sendMethod(channelNumber, AmqpConstants.CLASS_TX, AmqpConstants.METHOD_TX_COMMIT_OK, null);
+    }
+
+    private void handleTxRollback(ByteBuf payload) {
+        logger.debug("Tx Rollback on channel {}", channelNumber);
+        txRollback();
+        // Send Tx.Rollback-Ok
+        connection.sendMethod(channelNumber, AmqpConstants.CLASS_TX, AmqpConstants.METHOD_TX_ROLLBACK_OK, null);
+    }
     
     private void handleBasicMethod(short methodId, ByteBuf payload) {
         switch (methodId) {
+            case AmqpConstants.METHOD_BASIC_QOS:
+                handleBasicQos(payload);
+                break;
             case AmqpConstants.METHOD_BASIC_PUBLISH:
                 handleBasicPublish(payload);
                 break;
             case AmqpConstants.METHOD_BASIC_CONSUME:
                 handleBasicConsume(payload);
+                break;
+            case AmqpConstants.METHOD_BASIC_CANCEL:
+                handleBasicCancel(payload);
                 break;
             case AmqpConstants.METHOD_BASIC_GET:
                 handleBasicGet(payload);
@@ -289,12 +341,57 @@ public class AmqpChannel {
                 logger.warn("Unknown Basic method: {}", methodId);
         }
     }
+
+    private void handleBasicQos(ByteBuf payload) {
+        int prefetchSize = payload.readInt(); // prefetch-size (ignored by RabbitMQ)
+        short prefetchCount = payload.readShort(); // prefetch-count
+        boolean global = AmqpCodec.decodeBoolean(payload);
+
+        logger.debug("Basic QoS: prefetchSize={}, prefetchCount={}, global={}",
+                    prefetchSize, prefetchCount, global);
+
+        setQoS(prefetchCount);
+
+        // Send Qos-Ok
+        connection.sendMethod(channelNumber, AmqpConstants.CLASS_BASIC, AmqpConstants.METHOD_BASIC_QOS_OK, null);
+    }
+
+    private void handleBasicCancel(ByteBuf payload) {
+        String consumerTag = AmqpCodec.decodeShortString(payload);
+        boolean noWait = AmqpCodec.decodeBoolean(payload);
+
+        logger.debug("Basic Cancel: consumerTag={}, noWait={}", consumerTag, noWait);
+
+        try {
+            // Remove consumer from broker
+            broker.cancelConsumer(consumerTag);
+            removeConsumer(consumerTag);
+
+            if (!noWait) {
+                // Send Cancel-Ok
+                ByteBuf cancelOkPayload = Unpooled.buffer();
+                AmqpCodec.encodeShortString(cancelOkPayload, consumerTag);
+                connection.sendMethod(channelNumber, AmqpConstants.CLASS_BASIC,
+                                     AmqpConstants.METHOD_BASIC_CANCEL_OK, cancelOkPayload);
+            }
+        } catch (Exception e) {
+            logger.error("Failed to cancel consumer: {}", consumerTag, e);
+        }
+    }
     
     private void handleConnectionStartOk(ByteBuf payload) {
-        payload.skipBytes(4); // client-properties table
-        String mechanism = AmqpCodec.decodeLongString(payload);
+        // client-properties is a table: 4-byte length + table data
+        int tableLength = payload.readInt();
+        if (tableLength > 0) {
+            payload.skipBytes(tableLength); // Skip the table data
+        }
+
+        // mechanism is a short-string
+        String mechanism = AmqpCodec.decodeShortString(payload);
+        // response is a long-string (SASL response)
         String response = AmqpCodec.decodeLongString(payload);
-        String locale = AmqpCodec.decodeLongString(payload);
+        // locale is a short-string
+        String locale = AmqpCodec.decodeShortString(payload);
 
         logger.debug("Connection Start-Ok: mechanism={}, locale={}", mechanism, locale);
 
@@ -436,14 +533,16 @@ public class AmqpChannel {
     }
     
     private void handleExchangeDeclare(ByteBuf payload) {
-        payload.skipBytes(2);
+        payload.skipBytes(2); // reserved
         String exchangeName = AmqpCodec.decodeShortString(payload);
         String exchangeType = AmqpCodec.decodeShortString(payload);
-        boolean passive = AmqpCodec.decodeBoolean(payload);
-        boolean durable = AmqpCodec.decodeBoolean(payload);
-        boolean autoDelete = AmqpCodec.decodeBoolean(payload);
-        boolean internal = AmqpCodec.decodeBoolean(payload);
-        boolean nowait = AmqpCodec.decodeBoolean(payload);
+        // Flags are packed as bit flags in a single byte
+        byte flags = payload.readByte();
+        boolean passive = (flags & 0x01) != 0;
+        boolean durable = (flags & 0x02) != 0;
+        boolean autoDelete = (flags & 0x04) != 0;
+        boolean internal = (flags & 0x08) != 0;
+        boolean nowait = (flags & 0x10) != 0;
         
         logger.debug("Exchange Declare: name={}, type={}", exchangeName, exchangeType);
 
@@ -475,13 +574,15 @@ public class AmqpChannel {
     }
     
     private void handleQueueDeclare(ByteBuf payload) {
-        payload.skipBytes(2);
+        payload.skipBytes(2); // reserved
         String queueName = AmqpCodec.decodeShortString(payload);
-        boolean passive = AmqpCodec.decodeBoolean(payload);
-        boolean durable = AmqpCodec.decodeBoolean(payload);
-        boolean exclusive = AmqpCodec.decodeBoolean(payload);
-        boolean autoDelete = AmqpCodec.decodeBoolean(payload);
-        boolean nowait = AmqpCodec.decodeBoolean(payload);
+        // Flags are packed as bit flags in a single byte
+        byte flags = payload.readByte();
+        boolean passive = (flags & 0x01) != 0;
+        boolean durable = (flags & 0x02) != 0;
+        boolean exclusive = (flags & 0x04) != 0;
+        boolean autoDelete = (flags & 0x08) != 0;
+        boolean nowait = (flags & 0x10) != 0;
         
         logger.debug("Queue Declare: name={}", queueName);
 
@@ -535,24 +636,103 @@ public class AmqpChannel {
         }
     }
     
-    private void handleQueueDelete(ByteBuf payload) {
-        payload.skipBytes(2);
+    private void handleQueueUnbind(ByteBuf payload) {
+        payload.skipBytes(2); // reserved
         String queueName = AmqpCodec.decodeShortString(payload);
-        
-        logger.debug("Queue Delete: name={}", queueName);
-        
-        ByteBuf deleteOkPayload = Unpooled.buffer();
-        deleteOkPayload.writeInt(0);
-        
-        connection.sendMethod(channelNumber, (short) 50, (short) 41, deleteOkPayload);
+        String exchangeName = AmqpCodec.decodeShortString(payload);
+        String routingKey = AmqpCodec.decodeShortString(payload);
+
+        logger.debug("Queue Unbind: queue={}, exchange={}, routingKey={}",
+                    queueName, exchangeName, routingKey);
+
+        try {
+            com.amqp.security.User user = connection.getUser();
+            if (user == null) {
+                user = broker.getAuthenticationManager().getUser("guest");
+            }
+
+            broker.unbindQueue(connection.getVirtualHost(), user, queueName, exchangeName, routingKey);
+
+            // Send Unbind-Ok
+            connection.sendMethod(channelNumber, AmqpConstants.CLASS_QUEUE,
+                                 AmqpConstants.METHOD_QUEUE_UNBIND_OK, null);
+        } catch (Exception e) {
+            logger.error("Failed to unbind queue: {}", queueName, e);
+        }
+    }
+
+    private void handleQueuePurge(ByteBuf payload) {
+        payload.skipBytes(2); // reserved
+        String queueName = AmqpCodec.decodeShortString(payload);
+        boolean noWait = AmqpCodec.decodeBoolean(payload);
+
+        logger.debug("Queue Purge: queue={}, noWait={}", queueName, noWait);
+
+        try {
+            com.amqp.security.User user = connection.getUser();
+            if (user == null) {
+                user = broker.getAuthenticationManager().getUser("guest");
+            }
+
+            int purgedCount = broker.purgeQueue(connection.getVirtualHost(), user, queueName);
+
+            if (!noWait) {
+                // Send Purge-Ok with message count
+                ByteBuf purgeOkPayload = Unpooled.buffer();
+                purgeOkPayload.writeInt(purgedCount);
+                connection.sendMethod(channelNumber, AmqpConstants.CLASS_QUEUE,
+                                     AmqpConstants.METHOD_QUEUE_PURGE_OK, purgeOkPayload);
+            }
+        } catch (Exception e) {
+            logger.error("Failed to purge queue: {}", queueName, e);
+        }
+    }
+
+    private void handleQueueDelete(ByteBuf payload) {
+        payload.skipBytes(2); // reserved
+        String queueName = AmqpCodec.decodeShortString(payload);
+        // In AMQP 0-9-1, if-unused, if-empty, and nowait are bit flags in a single byte
+        byte flags = payload.readByte();
+        boolean ifUnused = (flags & 0x01) != 0;
+        boolean ifEmpty = (flags & 0x02) != 0;
+        boolean noWait = (flags & 0x04) != 0;
+
+        logger.debug("Queue Delete: name={}, ifUnused={}, ifEmpty={}", queueName, ifUnused, ifEmpty);
+
+        try {
+            com.amqp.security.User user = connection.getUser();
+            if (user == null) {
+                user = broker.getAuthenticationManager().getUser("guest");
+            }
+
+            int deletedCount = broker.deleteQueue(connection.getVirtualHost(), user, queueName, ifUnused, ifEmpty);
+
+            if (!noWait) {
+                ByteBuf deleteOkPayload = Unpooled.buffer();
+                deleteOkPayload.writeInt(deletedCount);
+                connection.sendMethod(channelNumber, AmqpConstants.CLASS_QUEUE,
+                                     AmqpConstants.METHOD_QUEUE_DELETE_OK, deleteOkPayload);
+            }
+        } catch (Exception e) {
+            logger.error("Failed to delete queue: {}", queueName, e);
+            // Send Delete-Ok with 0 count on error
+            if (!AmqpCodec.decodeBoolean(payload)) {
+                ByteBuf deleteOkPayload = Unpooled.buffer();
+                deleteOkPayload.writeInt(0);
+                connection.sendMethod(channelNumber, AmqpConstants.CLASS_QUEUE,
+                                     AmqpConstants.METHOD_QUEUE_DELETE_OK, deleteOkPayload);
+            }
+        }
     }
     
     private void handleBasicPublish(ByteBuf payload) {
-        payload.skipBytes(2);
+        payload.skipBytes(2); // reserved
         String exchangeName = AmqpCodec.decodeShortString(payload);
         String routingKey = AmqpCodec.decodeShortString(payload);
-        boolean mandatory = AmqpCodec.decodeBoolean(payload);
-        boolean immediate = AmqpCodec.decodeBoolean(payload);
+        // mandatory and immediate are packed as bit flags in a single byte
+        byte flags = payload.readByte();
+        boolean mandatory = (flags & 0x01) != 0;
+        boolean immediate = (flags & 0x02) != 0;
 
         logger.debug("Basic Publish: exchange={}, routingKey={}", exchangeName, routingKey);
 
@@ -943,6 +1123,11 @@ public class AmqpChannel {
         // Initialize body buffer if needed
         if (bodySize > 0) {
             currentPublishContext.bodyBuffer = Unpooled.buffer((int) bodySize);
+        } else {
+            // Zero-body message - publish immediately
+            logger.debug("Received zero-body message, publishing immediately");
+            completePublish();
+            return;
         }
 
         logger.debug("Received content header: bodySize={}, contentType={}",
@@ -965,14 +1150,15 @@ public class AmqpChannel {
         // Check if we've received the complete message
         long receivedSize = currentPublishContext.bodyBuffer != null ?
                            currentPublishContext.bodyBuffer.readableBytes() : 0;
+        long expectedSize = currentPublishContext.expectedBodySize;
 
-        if (receivedSize >= currentPublishContext.expectedBodySize) {
+        logger.debug("Received content body: size={}, total={}/{}",
+                    payload.readableBytes(), receivedSize, expectedSize);
+
+        if (receivedSize >= expectedSize) {
             // Message complete - publish it
             completePublish();
         }
-
-        logger.debug("Received content body: size={}, total={}/{}",
-                    payload.readableBytes(), receivedSize, currentPublishContext.expectedBodySize);
     }
 
     private void completePublish() {

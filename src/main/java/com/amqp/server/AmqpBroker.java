@@ -182,7 +182,101 @@ public class AmqpBroker {
         User guestUser = authenticationManager.getUser("guest");
         bindQueue("/", guestUser, queueName, exchangeName, routingKey);
     }
-    
+
+    public void unbindQueue(String vhostName, User user, String queueName,
+                           String exchangeName, String routingKey) {
+        VirtualHost vhost = authenticationManager.getVirtualHost(vhostName);
+        if (vhost == null) {
+            throw new IllegalArgumentException("Virtual host not found: " + vhostName);
+        }
+
+        if (!authenticationManager.authorize(user, vhostName, Permission.CONFIGURE, queueName)) {
+            throw new SecurityException("User does not have permission to configure queue: " + queueName);
+        }
+
+        Exchange exchange = vhost.getExchange(exchangeName);
+        if (exchange == null) {
+            throw new IllegalArgumentException("Exchange not found: " + exchangeName);
+        }
+
+        exchange.removeBinding(routingKey, queueName);
+        persistenceManager.deleteBinding(vhostName, exchangeName, queueName, routingKey);
+
+        logger.info("Unbound queue {} from exchange {} with routing key {} on vhost {}",
+                   queueName, exchangeName, routingKey, vhostName);
+    }
+
+    public int purgeQueue(String vhostName, User user, String queueName) {
+        VirtualHost vhost = authenticationManager.getVirtualHost(vhostName);
+        if (vhost == null) {
+            throw new IllegalArgumentException("Virtual host not found: " + vhostName);
+        }
+
+        if (!authenticationManager.authorize(user, vhostName, Permission.WRITE, queueName)) {
+            throw new SecurityException("User does not have permission to purge queue: " + queueName);
+        }
+
+        Queue queue = vhost.getQueue(queueName);
+        if (queue == null) {
+            throw new IllegalArgumentException("Queue not found: " + queueName);
+        }
+
+        int purgedCount = queue.size();
+        queue.clear();
+
+        // Also delete persisted messages for this queue
+        persistenceManager.deleteAllMessages(vhostName, queueName);
+
+        logger.info("Purged {} messages from queue {} on vhost {}", purgedCount, queueName, vhostName);
+        return purgedCount;
+    }
+
+    public int deleteQueue(String vhostName, User user, String queueName,
+                          boolean ifUnused, boolean ifEmpty) {
+        VirtualHost vhost = authenticationManager.getVirtualHost(vhostName);
+        if (vhost == null) {
+            throw new IllegalArgumentException("Virtual host not found: " + vhostName);
+        }
+
+        if (!authenticationManager.authorize(user, vhostName, Permission.CONFIGURE, queueName)) {
+            throw new SecurityException("User does not have permission to delete queue: " + queueName);
+        }
+
+        Queue queue = vhost.getQueue(queueName);
+        if (queue == null) {
+            return 0; // Queue doesn't exist, nothing to delete
+        }
+
+        // Check conditions
+        if (ifUnused && consumerManager.hasConsumersForQueue(queueName)) {
+            throw new IllegalStateException("Queue is in use: " + queueName);
+        }
+
+        if (ifEmpty && queue.size() > 0) {
+            throw new IllegalStateException("Queue is not empty: " + queueName);
+        }
+
+        int messageCount = queue.size();
+
+        // Remove from all exchange bindings
+        for (Exchange exchange : vhost.getAllExchanges()) {
+            exchange.removeAllBindingsToQueue(queueName);
+        }
+
+        // Remove consumers
+        consumerManager.removeConsumersForQueue(queueName);
+
+        // Remove the queue from vhost
+        vhost.removeQueue(queueName);
+
+        // Delete persisted queue and messages
+        persistenceManager.deleteQueue(vhostName, queueName);
+        persistenceManager.deleteAllMessages(vhostName, queueName);
+
+        logger.info("Deleted queue {} with {} messages on vhost {}", queueName, messageCount, vhostName);
+        return messageCount;
+    }
+
     public void publishMessage(String vhostName, User user, String exchangeName,
                               String routingKey, Message message) {
         VirtualHost vhost = authenticationManager.getVirtualHost(vhostName);
@@ -194,13 +288,27 @@ public class AmqpBroker {
             throw new SecurityException("User does not have permission to publish to exchange: " + exchangeName);
         }
 
-        Exchange exchange = vhost.getExchange(exchangeName);
-        if (exchange == null) {
-            logger.warn("Exchange not found: {}", exchangeName);
-            return;
-        }
+        List<String> targetQueues;
 
-        List<String> targetQueues = exchange.route(routingKey, message);
+        // Special handling for default exchange (empty name)
+        // The default exchange routes directly to queue with name = routing key
+        if (exchangeName == null || exchangeName.isEmpty()) {
+            targetQueues = new java.util.ArrayList<>();
+            // Check if queue exists with name = routing key
+            Queue directQueue = vhost.getQueue(routingKey);
+            if (directQueue != null) {
+                targetQueues.add(routingKey);
+            } else {
+                logger.debug("Default exchange: no queue found with name '{}'", routingKey);
+            }
+        } else {
+            Exchange exchange = vhost.getExchange(exchangeName);
+            if (exchange == null) {
+                logger.warn("Exchange not found: {}", exchangeName);
+                return;
+            }
+            targetQueues = exchange.route(routingKey, message);
+        }
 
         for (String queueName : targetQueues) {
             Queue queue = vhost.getQueue(queueName);
@@ -499,11 +607,11 @@ public class AmqpBroker {
         }
 
         ConsumerManager.Consumer consumer = consumerManager.addConsumer(
-            consumerTag, queueName, channelNumber, noAck, exclusive, arguments
+            consumerTag, queueName, channelNumber, noAck, exclusive, arguments, connection
         );
 
         // Start delivering messages to this queue
-        deliveryService.startDelivery(queue, connection);
+        deliveryService.startDelivery(queue);
 
         logger.info("Consumer added: {} for queue: {} in vhost: {}", consumerTag, queueName, vhostName);
         return consumer;

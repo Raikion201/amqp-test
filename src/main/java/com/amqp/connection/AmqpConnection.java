@@ -50,12 +50,32 @@ public class AmqpConnection {
     public void handleFrame(AmqpFrame frame) {
         short channelNumber = frame.getChannel();
         AmqpChannel channel = channels.get(channelNumber);
-        
+
         if (channel == null) {
-            logger.warn("Received frame for unknown channel: {}", channelNumber);
-            return;
+            // Check if this is a Channel.Open method (class=20, method=10)
+            // In AMQP, Channel.Open is sent on the channel being opened
+            if (frame.getType() == AmqpFrame.FrameType.METHOD.getValue() && channelNumber > 0) {
+                ByteBuf payload = frame.getPayload();
+                payload.markReaderIndex();
+                if (payload.readableBytes() >= 4) {
+                    short classId = payload.readShort();
+                    short methodId = payload.readShort();
+                    payload.resetReaderIndex();
+
+                    // Channel.Open = class 20, method 10
+                    if (classId == 20 && methodId == 10) {
+                        logger.debug("Creating new channel: {}", channelNumber);
+                        channel = openChannel(channelNumber);
+                    }
+                }
+            }
+
+            if (channel == null) {
+                logger.warn("Received frame for unknown channel: {}", channelNumber);
+                return;
+            }
         }
-        
+
         try {
             channel.handleFrame(frame);
         } catch (Exception e) {
@@ -87,6 +107,9 @@ public class AmqpConnection {
     public void sendFrame(AmqpFrame frame) {
         if (nettyChannel.isActive()) {
             nettyChannel.writeAndFlush(frame);
+            logger.debug("Frame sent: type={}, channel={}, size={}", frame.getType(), frame.getChannel(), frame.getSize());
+        } else {
+            logger.warn("Cannot send frame - netty channel not active: type={}, channel={}, size={}", frame.getType(), frame.getChannel(), frame.getSize());
         }
     }
     

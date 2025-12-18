@@ -3,6 +3,7 @@ package com.amqp.handler;
 import com.amqp.amqp.AmqpFrame;
 import com.amqp.amqp.AmqpCodec;
 import com.amqp.amqp.AmqpConstants;
+import com.amqp.amqp.ProtocolHeaderReceivedEvent;
 import com.amqp.server.AmqpBroker;
 import com.amqp.connection.AmqpConnection;
 import io.netty.buffer.ByteBuf;
@@ -51,7 +52,20 @@ public class AmqpConnectionHandler extends SimpleChannelInboundHandler<AmqpFrame
         connection = new AmqpConnection(ctx.channel(), broker);
         connections.put(ctx.channel().remoteAddress(), connection);
 
-        sendConnectionStart(ctx);
+        // Don't send Connection.Start yet - wait for protocol header from client
+        // The ProtocolHeaderReceivedEvent will trigger sendConnectionStart()
+        logger.debug("Waiting for AMQP protocol header from {}", ctx.channel().remoteAddress());
+    }
+
+    @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+        if (evt instanceof ProtocolHeaderReceivedEvent) {
+            // Client sent valid AMQP protocol header, now send Connection.Start
+            logger.debug("Protocol header received, sending Connection.Start to {}", ctx.channel().remoteAddress());
+            sendConnectionStart(ctx);
+        } else {
+            super.userEventTriggered(ctx, evt);
+        }
     }
 
     private void sendConnectionCloseAndDisconnect(ChannelHandlerContext ctx, int replyCode, String replyText) {

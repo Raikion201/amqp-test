@@ -20,7 +20,7 @@ class ConsumerManagerTest {
     @Test
     void testAddConsumer() {
         ConsumerManager.Consumer consumer = manager.addConsumer(
-            "ctag-1", "test-queue", (short) 1, false, false, null
+            "ctag-1", "test-queue", (short) 1, false, false, null, null
         );
 
         assertThat(consumer).isNotNull();
@@ -32,7 +32,7 @@ class ConsumerManagerTest {
 
     @Test
     void testRemoveConsumer() {
-        manager.addConsumer("ctag-1", "test-queue", (short) 1, false, false, null);
+        manager.addConsumer("ctag-1", "test-queue", (short) 1, false, false, null, null);
 
         ConsumerManager.Consumer removed = manager.removeConsumer("ctag-1");
 
@@ -42,9 +42,9 @@ class ConsumerManagerTest {
 
     @Test
     void testGetConsumersForQueue() {
-        manager.addConsumer("ctag-1", "queue-1", (short) 1, false, false, null);
-        manager.addConsumer("ctag-2", "queue-1", (short) 1, false, false, null);
-        manager.addConsumer("ctag-3", "queue-2", (short) 1, false, false, null);
+        manager.addConsumer("ctag-1", "queue-1", (short) 1, false, false, null, null);
+        manager.addConsumer("ctag-2", "queue-1", (short) 1, false, false, null, null);
+        manager.addConsumer("ctag-3", "queue-2", (short) 1, false, false, null, null);
 
         Set<ConsumerManager.Consumer> consumers = manager.getConsumersForQueue("queue-1");
 
@@ -54,9 +54,9 @@ class ConsumerManagerTest {
 
     @Test
     void testGetConsumersForChannel() {
-        manager.addConsumer("ctag-1", "queue-1", (short) 1, false, false, null);
-        manager.addConsumer("ctag-2", "queue-2", (short) 1, false, false, null);
-        manager.addConsumer("ctag-3", "queue-3", (short) 2, false, false, null);
+        manager.addConsumer("ctag-1", "queue-1", (short) 1, false, false, null, null);
+        manager.addConsumer("ctag-2", "queue-2", (short) 1, false, false, null, null);
+        manager.addConsumer("ctag-3", "queue-3", (short) 2, false, false, null, null);
 
         Set<ConsumerManager.Consumer> consumers = manager.getConsumersForChannel((short) 1);
 
@@ -66,29 +66,29 @@ class ConsumerManagerTest {
 
     @Test
     void testExclusiveConsumer() {
-        manager.addConsumer("ctag-1", "queue-1", (short) 1, false, true, null);
+        manager.addConsumer("ctag-1", "queue-1", (short) 1, false, true, null, null);
 
         assertThatThrownBy(() ->
-            manager.addConsumer("ctag-2", "queue-1", (short) 1, false, false, null)
+            manager.addConsumer("ctag-2", "queue-1", (short) 1, false, false, null, null)
         ).isInstanceOf(IllegalStateException.class)
          .hasMessageContaining("exclusive");
     }
 
     @Test
     void testCannotAddExclusiveWhenOthersExist() {
-        manager.addConsumer("ctag-1", "queue-1", (short) 1, false, false, null);
+        manager.addConsumer("ctag-1", "queue-1", (short) 1, false, false, null, null);
 
         assertThatThrownBy(() ->
-            manager.addConsumer("ctag-2", "queue-1", (short) 1, false, true, null)
+            manager.addConsumer("ctag-2", "queue-1", (short) 1, false, true, null, null)
         ).isInstanceOf(IllegalStateException.class)
          .hasMessageContaining("exclusive");
     }
 
     @Test
     void testCancelConsumersForQueue() {
-        manager.addConsumer("ctag-1", "queue-1", (short) 1, false, false, null);
-        manager.addConsumer("ctag-2", "queue-1", (short) 1, false, false, null);
-        manager.addConsumer("ctag-3", "queue-2", (short) 1, false, false, null);
+        manager.addConsumer("ctag-1", "queue-1", (short) 1, false, false, null, null);
+        manager.addConsumer("ctag-2", "queue-1", (short) 1, false, false, null, null);
+        manager.addConsumer("ctag-3", "queue-2", (short) 1, false, false, null, null);
 
         AtomicInteger cancelCount = new AtomicInteger(0);
         manager.cancelConsumersForQueue("queue-1",
@@ -101,9 +101,9 @@ class ConsumerManagerTest {
 
     @Test
     void testCancelConsumersForChannel() {
-        manager.addConsumer("ctag-1", "queue-1", (short) 1, false, false, null);
-        manager.addConsumer("ctag-2", "queue-2", (short) 1, false, false, null);
-        manager.addConsumer("ctag-3", "queue-3", (short) 2, false, false, null);
+        manager.addConsumer("ctag-1", "queue-1", (short) 1, false, false, null, null);
+        manager.addConsumer("ctag-2", "queue-2", (short) 1, false, false, null, null);
+        manager.addConsumer("ctag-3", "queue-3", (short) 2, false, false, null, null);
 
         manager.cancelConsumersForChannel((short) 1);
 
@@ -115,8 +115,8 @@ class ConsumerManagerTest {
     void testGetConsumerCount() {
         assertThat(manager.getConsumerCount()).isEqualTo(0);
 
-        manager.addConsumer("ctag-1", "queue-1", (short) 1, false, false, null);
-        manager.addConsumer("ctag-2", "queue-2", (short) 1, false, false, null);
+        manager.addConsumer("ctag-1", "queue-1", (short) 1, false, false, null, null);
+        manager.addConsumer("ctag-2", "queue-2", (short) 1, false, false, null, null);
 
         assertThat(manager.getConsumerCount()).isEqualTo(2);
     }
@@ -128,7 +128,7 @@ class ConsumerManagerTest {
         args.put("x-cancel-on-ha-failover", true);
 
         ConsumerManager.Consumer consumer = manager.addConsumer(
-            "ctag-1", "queue-1", (short) 1, false, false, args
+            "ctag-1", "queue-1", (short) 1, false, false, args, null
         );
 
         Map<String, Object> retrievedArgs = consumer.getArguments();

@@ -457,18 +457,77 @@ public class PersistenceManager {
     
     public void deleteBinding(String exchangeName, String queueName, String routingKey) {
         String sql = "DELETE FROM bindings WHERE exchange_name = ? AND queue_name = ? AND routing_key = ?";
-        
+
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql)) {
-            
+
             stmt.setString(1, exchangeName);
             stmt.setString(2, queueName);
             stmt.setString(3, routingKey);
             stmt.executeUpdate();
             logger.debug("Deleted binding: {} -> {} ({})", exchangeName, queueName, routingKey);
-            
+
         } catch (SQLException e) {
             logger.error("Failed to delete binding: {} -> {}", exchangeName, queueName, e);
+        }
+    }
+
+    /**
+     * Delete a binding with vhost support.
+     */
+    public void deleteBinding(String vhost, String exchangeName, String queueName, String routingKey) {
+        String sql = "DELETE FROM bindings WHERE vhost = ? AND exchange_name = ? AND queue_name = ? AND routing_key = ?";
+
+        try (Connection conn = databaseManager.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+
+            stmt.setString(1, vhost);
+            stmt.setString(2, exchangeName);
+            stmt.setString(3, queueName);
+            stmt.setString(4, routingKey);
+            stmt.executeUpdate();
+            logger.debug("Deleted binding: {} -> {} ({}) in vhost: {}", exchangeName, queueName, routingKey, vhost);
+
+        } catch (SQLException e) {
+            logger.error("Failed to delete binding: {} -> {} in vhost: {}", exchangeName, queueName, vhost, e);
+        }
+    }
+
+    /**
+     * Delete a queue with vhost support.
+     */
+    public void deleteQueue(String vhost, String queueName) {
+        String sql = "DELETE FROM queues WHERE vhost = ? AND name = ?";
+
+        try (Connection conn = databaseManager.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+
+            stmt.setString(1, vhost);
+            stmt.setString(2, queueName);
+            stmt.executeUpdate();
+            logger.debug("Deleted queue: {} in vhost: {}", queueName, vhost);
+
+        } catch (SQLException e) {
+            logger.error("Failed to delete queue: {} in vhost: {}", queueName, vhost, e);
+        }
+    }
+
+    /**
+     * Delete all messages for a queue in a specific vhost.
+     */
+    public void deleteAllMessages(String vhost, String queueName) {
+        String sql = "DELETE FROM messages WHERE vhost = ? AND queue_name = ?";
+
+        try (Connection conn = databaseManager.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+
+            stmt.setString(1, vhost);
+            stmt.setString(2, queueName);
+            int deleted = stmt.executeUpdate();
+            logger.debug("Deleted {} messages from queue: {} in vhost: {}", deleted, queueName, vhost);
+
+        } catch (SQLException e) {
+            logger.error("Failed to delete messages from queue: {} in vhost: {}", queueName, vhost, e);
         }
     }
 }
