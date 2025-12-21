@@ -1,0 +1,94 @@
+version: '3.8'
+
+# CI/CD test configuration
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.test.yml up
+
+services:
+  amqp-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - JAVA_OPTS=-Xmx512m -Xms256m
+      - AMQP_USER=test
+      - AMQP_PASSWORD=test
+    healthcheck:
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # Run Qpid Proton tests
+  qpid-test-runner:
+    image: python:3.11-slim
+    container_name: qpid-test-runner
+    depends_on:
+      amqp-server:
+        condition: service_healthy
+    volumes:
+      - ../src/test/python:/tests:ro
+      - ./test-results:/results
+    environment:
+      - AMQP_HOST=amqp-server
+      - AMQP_PORT_091=5672
+      - AMQP_PORT_10=5671
+      - AMQP_USER=test
+      - AMQP_PASSWORD=test
+    command: >
+      sh -c "
+        pip install python-qpid-proton pytest &&
+        cd /tests &&
+        pytest -v --junitxml=/results/qpid-results.xml
+      "
+    networks:
+      - amqp-network
+
+  # Run Java integration tests
+  java-test-runner:
+    image: maven:3.9-eclipse-temurin-17
+    container_name: java-test-runner
+    depends_on:
+      amqp-server:
+        condition: service_healthy
+    volumes:
+      - ..:/project:ro
+      - maven-cache:/root/.m2
+      - ./test-results:/results
+    environment:
+      - AMQP_HOST=amqp-server
+      - AMQP_PORT_091=5672
+      - AMQP_PORT_10=5671
+    working_dir: /project
+    command: >
+      sh -c "
+        mvn test -Dtest=*IT -DfailIfNoTests=false &&
+        cp -r target/surefire-reports/* /results/ || true
+      "
+    networks:
+      - amqp-network
+
+  # Performance test runner
+  perf-test-runner:
+    image: pivotalrabbitmq/perf-test:latest
+    container_name: perf-test-runner
+    depends_on:
+      amqp-server:
+        condition: service_healthy
+    environment:
+      - URI=amqp://test:test@amqp-server:5672
+    command: >
+      --uri amqp://test:test@amqp-server:5672
+      --producers 2
+      --consumers 2
+      --rate 1000
+      --time 60
+      --json-body
+      --body-size 256
+      --metrics-prometheus
+    networks:
+      - amqp-network
+    profiles:
+      - perf
+
+volumes:
+  maven-cache:

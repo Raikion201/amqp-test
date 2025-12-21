@@ -180,6 +180,44 @@ public class ConsumerManager {
         }
     }
 
+    /**
+     * Cancel all consumers for a specific connection and channel.
+     * This is the correct method to call when a channel closes.
+     */
+    public void cancelConsumersForChannel(Object connection, short channelNumber) {
+        List<String> tagsToRemove = new ArrayList<>();
+        for (Consumer consumer : consumers.values()) {
+            if (consumer.getConnection() == connection && consumer.getChannelNumber() == channelNumber) {
+                // Mark inactive FIRST to prevent deliveries during removal
+                consumer.setActive(false);
+                tagsToRemove.add(consumer.getConsumerTag());
+            }
+        }
+        for (String tag : tagsToRemove) {
+            removeConsumer(tag);
+            logger.info("Cancelled consumer {} due to channel close", tag);
+        }
+    }
+
+    /**
+     * Cancel all consumers for a specific connection.
+     * This should be called when a connection closes.
+     */
+    public void cancelConsumersForConnection(Object connection) {
+        List<String> tagsToRemove = new ArrayList<>();
+        for (Consumer consumer : consumers.values()) {
+            if (consumer.getConnection() == connection) {
+                // Mark inactive FIRST to prevent deliveries during removal
+                consumer.setActive(false);
+                tagsToRemove.add(consumer.getConsumerTag());
+            }
+        }
+        for (String tag : tagsToRemove) {
+            removeConsumer(tag);
+            logger.info("Cancelled consumer {} due to connection close", tag);
+        }
+    }
+
     public int getConsumerCount() {
         return consumers.size();
     }

@@ -27,6 +27,13 @@
         <bcrypt.version>0.10.2</bcrypt.version>
         <rabbitmq.client.version>5.20.0</rabbitmq.client.version>
         <awaitility.version>4.2.0</awaitility.version>
+        <!-- AMQP 1.0 and Security -->
+        <qpid.proton.version>0.34.1</qpid.proton.version>
+        <scram.version>2.1</scram.version>
+        <nimbus.jwt.version>9.37</nimbus.jwt.version>
+        <unboundid.ldap.version>6.0.11</unboundid.ldap.version>
+        <testcontainers.version>1.19.3</testcontainers.version>
+        <bouncycastle.version>1.77</bouncycastle.version>
     </properties>
     
     <dependencies>
@@ -63,6 +70,39 @@
             <groupId>at.favre.lib</groupId>
             <artifactId>bcrypt</artifactId>
             <version>${bcrypt.version}</version>
+        </dependency>
+
+        <!-- SCRAM-SHA authentication -->
+        <dependency>
+            <groupId>com.ongres.scram</groupId>
+            <artifactId>client</artifactId>
+            <version>${scram.version}</version>
+        </dependency>
+
+        <!-- JWT/OAuth2 -->
+        <dependency>
+            <groupId>com.nimbusds</groupId>
+            <artifactId>nimbus-jose-jwt</artifactId>
+            <version>${nimbus.jwt.version}</version>
+        </dependency>
+
+        <!-- LDAP -->
+        <dependency>
+            <groupId>com.unboundid</groupId>
+            <artifactId>unboundid-ldapsdk</artifactId>
+            <version>${unboundid.ldap.version}</version>
+        </dependency>
+
+        <!-- BouncyCastle for advanced crypto -->
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcprov-jdk18on</artifactId>
+            <version>${bouncycastle.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcpkix-jdk18on</artifactId>
+            <version>${bouncycastle.version}</version>
         </dependency>
 
         <!-- Logging -->
@@ -110,12 +150,11 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- H2 Database for testing -->
+        <!-- H2 Database (included in JAR for Docker testing) -->
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
             <version>2.2.224</version>
-            <scope>test</scope>
         </dependency>
 
         <!-- Mockito for mocking -->
@@ -130,6 +169,128 @@
             <groupId>org.mockito</groupId>
             <artifactId>mockito-junit-jupiter</artifactId>
             <version>5.8.0</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Qpid Proton for AMQP 1.0 testing -->
+        <dependency>
+            <groupId>org.apache.qpid</groupId>
+            <artifactId>proton-j</artifactId>
+            <version>${qpid.proton.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Testcontainers for Docker-based testing -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
+            <version>${testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Additional AMQP Client Libraries for Compliance Testing -->
+
+        <!-- 1. Qpid JMS Client (JMS over AMQP 1.0) -->
+        <dependency>
+            <groupId>org.apache.qpid</groupId>
+            <artifactId>qpid-jms-client</artifactId>
+            <version>2.5.0</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- 2. Vert.x AMQP Client -->
+        <dependency>
+            <groupId>io.vertx</groupId>
+            <artifactId>vertx-amqp-client</artifactId>
+            <version>4.5.1</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.vertx</groupId>
+            <artifactId>vertx-junit5</artifactId>
+            <version>4.5.1</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- 3. Spring AMQP -->
+        <dependency>
+            <groupId>org.springframework.amqp</groupId>
+            <artifactId>spring-rabbit</artifactId>
+            <version>3.1.1</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-context</artifactId>
+            <version>6.1.2</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- 4. Reactor RabbitMQ -->
+        <dependency>
+            <groupId>io.projectreactor.rabbitmq</groupId>
+            <artifactId>reactor-rabbitmq</artifactId>
+            <version>1.5.6</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- 5. RabbitMQ JMS Client -->
+        <dependency>
+            <groupId>com.rabbitmq.jms</groupId>
+            <artifactId>rabbitmq-jms</artifactId>
+            <version>3.2.0</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- 6. Apache Camel AMQP -->
+        <dependency>
+            <groupId>org.apache.camel</groupId>
+            <artifactId>camel-amqp</artifactId>
+            <version>4.3.0</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.camel</groupId>
+            <artifactId>camel-core</artifactId>
+            <version>4.3.0</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- 7. Smallrye Reactive Messaging AMQP -->
+        <dependency>
+            <groupId>io.smallrye.reactive</groupId>
+            <artifactId>smallrye-reactive-messaging-amqp</artifactId>
+            <version>4.13.0</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- 8. Eclipse Vert.x Proton (low-level AMQP 1.0) -->
+        <dependency>
+            <groupId>io.vertx</groupId>
+            <artifactId>vertx-proton</artifactId>
+            <version>4.5.1</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- 9. Jakarta Messaging API -->
+        <dependency>
+            <groupId>jakarta.jms</groupId>
+            <artifactId>jakarta.jms-api</artifactId>
+            <version>3.1.0</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- 10. Smallrye Mutiny (for reactive testing) -->
+        <dependency>
+            <groupId>io.smallrye.reactive</groupId>
+            <artifactId>mutiny</artifactId>
+            <version>2.5.1</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

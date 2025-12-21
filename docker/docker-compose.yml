@@ -1,0 +1,106 @@
+version: '3.8'
+
+services:
+  # AMQP Server
+  amqp-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: amqp-server
+    ports:
+      - "5672:5672"   # AMQP 0-9-1
+      - "5671:5671"   # AMQP 1.0
+      - "5673:5673"   # AMQP 0-9-1 + TLS
+      - "5674:5674"   # AMQP 1.0 + TLS
+      - "15672:15672" # Management
+    environment:
+      - JAVA_OPTS=-Xmx1g -Xms512m
+      - AMQP_USER=guest
+      - AMQP_PASSWORD=guest
+    volumes:
+      - amqp-data:/var/lib/amqp
+      - amqp-logs:/var/log/amqp
+      - ./certs:/etc/amqp/certs:ro
+    networks:
+      - amqp-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:15672/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # OpenLDAP for authentication testing
+  openldap:
+    image: osixia/openldap:1.5.0
+    container_name: openldap
+    environment:
+      - LDAP_ORGANISATION=AMQP Test
+      - LDAP_DOMAIN=amqp.test
+      - LDAP_ADMIN_PASSWORD=admin
+      - LDAP_CONFIG_PASSWORD=config
+    ports:
+      - "389:389"
+      - "636:636"
+    volumes:
+      - ldap-data:/var/lib/ldap
+      - ldap-config:/etc/ldap/slapd.d
+      - ./ldap/bootstrap.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/bootstrap.ldif:ro
+    networks:
+      - amqp-network
+    profiles:
+      - ldap
+
+  # Keycloak for OAuth2/JWT testing
+  keycloak:
+    image: quay.io/keycloak/keycloak:23.0
+    container_name: keycloak
+    command: start-dev
+    environment:
+      - KEYCLOAK_ADMIN=admin
+      - KEYCLOAK_ADMIN_PASSWORD=admin
+      - KC_HTTP_PORT=8080
+    ports:
+      - "8080:8080"
+    networks:
+      - amqp-network
+    profiles:
+      - oauth
+
+  # Qpid Proton test client
+  qpid-proton:
+    image: apache/qpid-proton-python:latest
+    container_name: qpid-proton-test
+    depends_on:
+      amqp-server:
+        condition: service_healthy
+    volumes:
+      - ./tests:/tests:ro
+    networks:
+      - amqp-network
+    entrypoint: ["tail", "-f", "/dev/null"]
+    profiles:
+      - test
+
+  # RabbitMQ PerfTest
+  perf-test:
+    image: pivotalrabbitmq/perf-test:latest
+    container_name: rabbitmq-perf-test
+    depends_on:
+      amqp-server:
+        condition: service_healthy
+    networks:
+      - amqp-network
+    entrypoint: ["tail", "-f", "/dev/null"]
+    profiles:
+      - test
+
+volumes:
+  amqp-data:
+  amqp-logs:
+  ldap-data:
+  ldap-config:
+
+networks:
+  amqp-network:
+    driver: bridge

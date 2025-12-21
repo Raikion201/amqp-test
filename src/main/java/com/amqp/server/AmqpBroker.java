@@ -103,6 +103,12 @@ public class AmqpBroker {
     
     public synchronized Queue declareQueue(String vhostName, User user, String name,
                                          boolean durable, boolean exclusive, boolean autoDelete) {
+        return declareQueue(vhostName, user, name, durable, exclusive, autoDelete, null);
+    }
+
+    public synchronized Queue declareQueue(String vhostName, User user, String name,
+                                         boolean durable, boolean exclusive, boolean autoDelete,
+                                         java.util.Map<String, Object> arguments) {
         VirtualHost vhost = authenticationManager.getVirtualHost(vhostName);
         if (vhost == null) {
             throw new IllegalArgumentException("Virtual host not found: " + vhostName);
@@ -129,7 +135,7 @@ public class AmqpBroker {
             return existing;
         }
 
-        Queue queue = new Queue(name, durable, exclusive, autoDelete);
+        Queue queue = new Queue(name, durable, exclusive, autoDelete, arguments);
         vhost.addQueue(queue);
 
         if (durable) {
@@ -633,6 +639,22 @@ public class AmqpBroker {
     }
 
     /**
+     * Cancel all consumers for a specific connection and channel.
+     * Called when a channel closes.
+     */
+    public void cancelConsumersForChannel(Object connection, short channelNumber) {
+        consumerManager.cancelConsumersForChannel(connection, channelNumber);
+    }
+
+    /**
+     * Cancel all consumers for a specific connection.
+     * Called when a connection closes.
+     */
+    public void cancelConsumersForConnection(Object connection) {
+        consumerManager.cancelConsumersForConnection(connection);
+    }
+
+    /**
      * Acknowledge a message delivery - delete from persistence if durable.
      */
     public void acknowledgeMessage(String vhostName, String queueName, Message message) {
@@ -711,5 +733,40 @@ public class AmqpBroker {
             throw new IllegalArgumentException(resourceType + " name cannot start with reserved prefix 'amq.' " +
                                              "(reserved for server-generated resources)");
         }
+    }
+
+    // ===== AMQP 1.0 Support Methods =====
+
+    /**
+     * Authenticate a user with username and password.
+     * Used by AMQP 1.0 SASL authentication.
+     *
+     * @param username The username
+     * @param password The password
+     * @return true if authentication successful, false otherwise
+     */
+    public boolean authenticate(String username, String password) {
+        User user = authenticationManager.authenticate(username, password);
+        return user != null;
+    }
+
+    /**
+     * Check if guest user authentication is enabled.
+     * Used to determine if ANONYMOUS SASL mechanism should be offered.
+     *
+     * @return true if guest user is enabled
+     */
+    public boolean isGuestUserEnabled() {
+        User guestUser = authenticationManager.getUser("guest");
+        return guestUser != null && guestUser.isActive();
+    }
+
+    /**
+     * Get the authentication manager for advanced authentication scenarios.
+     *
+     * @return The authentication manager
+     */
+    public AuthenticationManager getAuthenticationManager() {
+        return authenticationManager;
     }
 }

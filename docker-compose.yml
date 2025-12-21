@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  # Your AMQP server
+  amqp-server:
+    build: .
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      - JAVA_OPTS=-Xmx1g -Xms512m
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "5672"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - amqp-net
+
+  # RabbitMQ's official performance testing tool
+  perf-test:
+    image: pivotalrabbitmq/perf-test:latest
+    depends_on:
+      amqp-server:
+        condition: service_healthy
+    networks:
+      - amqp-net
+    # Override to keep container running for manual tests
+    entrypoint: ["tail", "-f", "/dev/null"]
+
+  # Network attack simulation
+  attack-tools:
+    image: alpine:latest
+    depends_on:
+      amqp-server:
+        condition: service_healthy
+    networks:
+      - amqp-net
+    entrypoint: ["tail", "-f", "/dev/null"]
+    command: []
+
+networks:
+  amqp-net:
+    driver: bridge

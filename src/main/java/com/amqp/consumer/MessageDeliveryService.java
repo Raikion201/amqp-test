@@ -178,18 +178,28 @@ public class MessageDeliveryService {
                     continue;
                 }
 
-                // Check prefetch limit per channel
+                // Verify connection and channel are still valid
                 AmqpConnection consumerConnection = (AmqpConnection) consumer.getConnection();
-                if (consumerConnection != null && !consumer.isNoAck()) {
-                    com.amqp.connection.AmqpChannel channel = consumerConnection.getChannel(consumer.getChannelNumber());
-                    if (channel != null) {
-                        int prefetchCount = channel.getPrefetchCount();
-                        int unackedCount = channel.getUnackedMessageCount();
-                        if (prefetchCount > 0 && unackedCount >= prefetchCount) {
-                            logger.debug("Prefetch limit reached for consumer {}: unacked={}, prefetch={}",
-                                       consumer.getConsumerTag(), unackedCount, prefetchCount);
-                            continue; // Skip this consumer - at prefetch limit
-                        }
+                if (consumerConnection == null) {
+                    logger.debug("Consumer {} has no connection, skipping", consumer.getConsumerTag());
+                    continue;
+                }
+
+                com.amqp.connection.AmqpChannel channel = consumerConnection.getChannel(consumer.getChannelNumber());
+                if (channel == null || !channel.isOpen()) {
+                    logger.debug("Consumer {} channel is closed or null, skipping", consumer.getConsumerTag());
+                    consumer.setActive(false); // Mark as inactive since channel is gone
+                    continue;
+                }
+
+                // Check prefetch limit per channel
+                if (!consumer.isNoAck()) {
+                    int prefetchCount = channel.getPrefetchCount();
+                    int unackedCount = channel.getUnackedMessageCount();
+                    if (prefetchCount > 0 && unackedCount >= prefetchCount) {
+                        logger.debug("Prefetch limit reached for consumer {}: unacked={}, prefetch={}",
+                                   consumer.getConsumerTag(), unackedCount, prefetchCount);
+                        continue; // Skip this consumer - at prefetch limit
                     }
                 }
 
@@ -219,26 +229,36 @@ public class MessageDeliveryService {
                 return;
             }
 
-            // Track delivery in the channel if not in noAck mode
-            long channelDeliveryTag = workerDeliveryTag; // Default for noAck
-            if (!consumer.isNoAck()) {
-                com.amqp.connection.AmqpChannel channel = consumerConnection.getChannel(consumer.getChannelNumber());
-                if (channel != null) {
-                    channelDeliveryTag = channel.trackDelivery(
-                        message, queue.getName(), consumerConnection.getVirtualHost(), false
-                    );
-                } else {
-                    logger.warn("Channel not found for consumer: {}", consumer.getConsumerTag());
-                    // Re-queue the message since we can't track it
-                    queue.enqueue(message);
-                    return;
-                }
+            // Verify channel is still open before delivery
+            com.amqp.connection.AmqpChannel channel = consumerConnection.getChannel(consumer.getChannelNumber());
+            if (channel == null || !channel.isOpen()) {
+                logger.warn("Channel closed for consumer: {}, requeuing message", consumer.getConsumerTag());
+                queue.enqueue(message);
+                return;
             }
 
             try {
                 // Synchronize on the connection to prevent frame interleaving
                 // Each message must be sent atomically: METHOD → HEADER → BODY
                 synchronized (consumerConnection) {
+                    // Double-check consumer is still active and channel is open
+                    // This check is done inside the lock to prevent race with channel close
+                    if (!consumer.isActive() || !channel.isOpen()) {
+                        logger.debug("Consumer {} cancelled or channel closed during delivery, requeuing",
+                                   consumer.getConsumerTag());
+                        queue.enqueue(message);
+                        return;
+                    }
+
+                    // Track delivery in the channel if not in noAck mode
+                    // Done inside synchronized block to ensure consistency
+                    long channelDeliveryTag = workerDeliveryTag; // Default for noAck
+                    if (!consumer.isNoAck()) {
+                        channelDeliveryTag = channel.trackDelivery(
+                            message, queue.getName(), consumerConnection.getVirtualHost(), false
+                        );
+                    }
+
                     // Build Basic.Deliver frame
                     ByteBuf deliverPayload = Unpooled.buffer();
 

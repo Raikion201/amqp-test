@@ -1220,25 +1220,33 @@ public class AmqpChannel {
     }
     
     public void close() {
-        open.set(false);
+        // Synchronize on connection to prevent race with message delivery
+        synchronized (connection) {
+            open.set(false);
 
-        // Requeue all unacknowledged messages
-        if (!unackedMessages.isEmpty()) {
-            logger.info("Requeuing {} unacknowledged messages on channel close", unackedMessages.size());
-            for (Map.Entry<Long, UnackedMessage> entry : unackedMessages.entrySet()) {
-                UnackedMessage unacked = entry.getValue();
-                broker.requeueMessage(unacked.vhost, unacked.queueName, unacked.message);
+            // Cancel all consumers on this channel FIRST
+            // This prevents deliveries to a closed channel
+            broker.cancelConsumersForChannel(connection, channelNumber);
+            consumers.clear();
+
+            // Requeue all unacknowledged messages
+            if (!unackedMessages.isEmpty()) {
+                logger.info("Requeuing {} unacknowledged messages on channel close", unackedMessages.size());
+                for (Map.Entry<Long, UnackedMessage> entry : unackedMessages.entrySet()) {
+                    UnackedMessage unacked = entry.getValue();
+                    broker.requeueMessage(unacked.vhost, unacked.queueName, unacked.message);
+                }
+                unackedMessages.clear();
             }
-            unackedMessages.clear();
-        }
 
-        // Clean up any pending publish context
-        if (currentPublishContext != null) {
-            currentPublishContext.releaseBuffer();
-            currentPublishContext = null;
-        }
+            // Clean up any pending publish context
+            if (currentPublishContext != null) {
+                currentPublishContext.releaseBuffer();
+                currentPublishContext = null;
+            }
 
-        logger.debug("Channel {} closed", channelNumber);
+            logger.debug("Channel {} closed", channelNumber);
+        }
     }
     
     public boolean isOpen() {

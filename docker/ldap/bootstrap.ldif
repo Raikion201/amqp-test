@@ -1,0 +1,105 @@
+# LDAP Bootstrap Data for Testing
+
+# Create users OU
+dn: ou=users,dc=amqp,dc=test
+objectClass: organizationalUnit
+ou: users
+
+# Create groups OU
+dn: ou=groups,dc=amqp,dc=test
+objectClass: organizationalUnit
+ou: groups
+
+# Test user: admin
+dn: uid=admin,ou=users,dc=amqp,dc=test
+objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
+uid: admin
+sn: Admin
+givenName: AMQP
+cn: AMQP Admin
+displayName: AMQP Admin
+uidNumber: 1000
+gidNumber: 1000
+homeDirectory: /home/admin
+loginShell: /bin/bash
+userPassword: {SSHA}admin
+
+# Test user: guest
+dn: uid=guest,ou=users,dc=amqp,dc=test
+objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
+uid: guest
+sn: Guest
+givenName: AMQP
+cn: AMQP Guest
+displayName: AMQP Guest
+uidNumber: 1001
+gidNumber: 1001
+homeDirectory: /home/guest
+loginShell: /bin/bash
+userPassword: {SSHA}guest
+
+# Test user: producer
+dn: uid=producer,ou=users,dc=amqp,dc=test
+objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
+uid: producer
+sn: Producer
+givenName: AMQP
+cn: AMQP Producer
+displayName: AMQP Producer
+uidNumber: 1002
+gidNumber: 1002
+homeDirectory: /home/producer
+loginShell: /bin/bash
+userPassword: {SSHA}producer
+
+# Test user: consumer
+dn: uid=consumer,ou=users,dc=amqp,dc=test
+objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
+uid: consumer
+sn: Consumer
+givenName: AMQP
+cn: AMQP Consumer
+displayName: AMQP Consumer
+uidNumber: 1003
+gidNumber: 1003
+homeDirectory: /home/consumer
+loginShell: /bin/bash
+userPassword: {SSHA}consumer
+
+# Admin group
+dn: cn=amqp-admins,ou=groups,dc=amqp,dc=test
+objectClass: groupOfNames
+cn: amqp-admins
+description: AMQP Administrators
+member: uid=admin,ou=users,dc=amqp,dc=test
+
+# Publishers group
+dn: cn=amqp-publishers,ou=groups,dc=amqp,dc=test
+objectClass: groupOfNames
+cn: amqp-publishers
+description: AMQP Publishers
+member: uid=admin,ou=users,dc=amqp,dc=test
+member: uid=producer,ou=users,dc=amqp,dc=test
+
+# Consumers group
+dn: cn=amqp-consumers,ou=groups,dc=amqp,dc=test
+objectClass: groupOfNames
+cn: amqp-consumers
+description: AMQP Consumers
+member: uid=admin,ou=users,dc=amqp,dc=test
+member: uid=consumer,ou=users,dc=amqp,dc=test
+
+# Guests group
+dn: cn=amqp-guests,ou=groups,dc=amqp,dc=test
+objectClass: groupOfNames
+cn: amqp-guests
+description: AMQP Guests
+member: uid=guest,ou=users,dc=amqp,dc=test
