@@ -760,13 +760,4 @@ public class AmqpBroker {
         User guestUser = authenticationManager.getUser("guest");
         return guestUser != null && guestUser.isActive();
     }
-
-    /**
-     * Get the authentication manager for advanced authentication scenarios.
-     *
-     * @return The authentication manager
-     */
-    public AuthenticationManager getAuthenticationManager() {
-        return authenticationManager;
-    }
 }

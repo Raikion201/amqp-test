@@ -9,6 +9,7 @@ import com.amqp.protocol.v10.transport.*;
 import com.amqp.protocol.v10.types.DescribedType;
 import com.amqp.protocol.v10.types.TypeDecoder;
 import com.amqp.protocol.v10.types.TypeEncoder;
+import com.amqp.security.sasl.amqp10.Sasl10Handler;
 import com.amqp.server.AmqpBroker;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.*;
@@ -20,6 +21,7 @@ import org.slf4j.LoggerFactory;
  * AMQP 1.0 Connection Handler.
  *
  * Handles the AMQP 1.0 protocol state machine and performative processing.
+ * Works with Sasl10Handler for authentication when SASL is required.
  */
 public class Amqp10ConnectionHandler extends ChannelInboundHandlerAdapter {
 
@@ -32,10 +34,6 @@ public class Amqp10ConnectionHandler extends ChannelInboundHandlerAdapter {
 
     private Amqp10Connection connection;
     private BrokerAdapter10 brokerAdapter;
-
-    // SASL state
-    private boolean saslComplete = false;
-    private String authenticatedUser = null;
 
     public Amqp10ConnectionHandler(AmqpBroker broker, String containerId,
                                     int maxFrameSize, boolean requireSasl) {
@@ -71,16 +69,11 @@ public class Amqp10ConnectionHandler extends ChannelInboundHandlerAdapter {
         if (msg instanceof Amqp10Frame) {
             handleFrame(ctx, (Amqp10Frame) msg);
         } else if (msg instanceof ByteBuf) {
-            // Could be protocol header response
-            handleProtocolEvent(ctx, msg);
+            // Could be protocol header response - pass through
+            super.channelRead(ctx, msg);
         } else {
             log.warn("Unknown message type: {}", msg.getClass());
         }
-    }
-
-    private void handleProtocolEvent(ChannelHandlerContext ctx, Object msg) {
-        // Protocol header handling is done in Amqp10ProtocolDecoder
-        // This handles any follow-up events
     }
 
     private void handleFrame(ChannelHandlerContext ctx, Amqp10Frame frame) {
@@ -111,22 +104,18 @@ public class Amqp10ConnectionHandler extends ChannelInboundHandlerAdapter {
 
             long descriptorCode = ((Number) descriptor).longValue();
 
-            // Handle based on frame type
+            // SASL frames are handled by Sasl10Handler before reaching us
             if (frame.getType() == FrameType.SASL) {
-                handleSaslFrame(ctx, descriptorCode, described);
-            } else {
-                handleAmqpFrame(ctx, channel, descriptorCode, described, body);
+                log.trace("SASL frame passed to handler (should be handled by Sasl10Handler)");
+                return;
             }
+
+            // Handle AMQP frames
+            handleAmqpFrame(ctx, channel, descriptorCode, described, body);
 
         } finally {
             frame.release();
         }
-    }
-
-    private void handleSaslFrame(ChannelHandlerContext ctx, long descriptorCode,
-                                  DescribedType described) {
-        // SASL handling will be implemented with SASL mechanisms
-        log.debug("SASL frame received: 0x{}", Long.toHexString(descriptorCode));
     }
 
     private void handleAmqpFrame(ChannelHandlerContext ctx, int channel, long descriptorCode,
@@ -167,6 +156,23 @@ public class Amqp10ConnectionHandler extends ChannelInboundHandlerAdapter {
     private void handleOpen(ChannelHandlerContext ctx, Open open) {
         log.debug("Received Open from {}", open.getContainerId());
 
+        // Get authenticated user from SASL handler
+        String authenticatedUser = Sasl10Handler.getAuthenticatedUser(ctx);
+        if (authenticatedUser != null) {
+            connection.setAuthenticatedUser(authenticatedUser);
+            log.debug("Connection authenticated as user: {}", authenticatedUser);
+        } else if (requireSasl) {
+            log.warn("SASL required but no authenticated user found");
+            ErrorCondition error = new ErrorCondition(
+                    ErrorCondition.UNAUTHORIZED_ACCESS,
+                    "Authentication required"
+            );
+            Close close = connection.createClose(error);
+            sendPerformative(ctx, 0, close);
+            ctx.close();
+            return;
+        }
+
         connection.onOpenReceived(open);
 
         // Send our Open response
@@ -174,8 +180,9 @@ public class Amqp10ConnectionHandler extends ChannelInboundHandlerAdapter {
         sendPerformative(ctx, 0, response);
         connection.onOpenSent();
 
-        log.info("AMQP 1.0 connection opened: {} <-> {}",
-                connection.getContainerId(), connection.getRemoteContainerId());
+        log.info("AMQP 1.0 connection opened: {} <-> {} (user: {})",
+                connection.getContainerId(), connection.getRemoteContainerId(),
+                authenticatedUser != null ? authenticatedUser : "anonymous");
     }
 
     private void handleBegin(ChannelHandlerContext ctx, int channel, Begin begin) {
