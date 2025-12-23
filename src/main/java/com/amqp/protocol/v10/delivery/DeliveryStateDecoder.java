@@ -1,5 +1,7 @@
 package com.amqp.protocol.v10.delivery;
 
+import com.amqp.protocol.v10.transaction.Declared;
+import com.amqp.protocol.v10.transaction.TransactionalState;
 import com.amqp.protocol.v10.types.AmqpType;
 import com.amqp.protocol.v10.types.DescribedType;
 
@@ -40,6 +42,10 @@ public class DeliveryStateDecoder {
             return Modified.decode(described);
         } else if (code == AmqpType.Descriptor.RECEIVED) {
             return Received.decode(described);
+        } else if (code == AmqpType.Descriptor.DECLARED) {
+            return Declared.decode(described);
+        } else if (code == AmqpType.Descriptor.TRANSACTIONAL_STATE) {
+            return TransactionalState.decode(described);
         }
 
         return null;

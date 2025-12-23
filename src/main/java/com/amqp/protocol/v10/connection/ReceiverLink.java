@@ -2,6 +2,8 @@ package com.amqp.protocol.v10.connection;
 
 import com.amqp.protocol.v10.delivery.*;
 import com.amqp.protocol.v10.messaging.Message10;
+import com.amqp.protocol.v10.server.Transaction10;
+import com.amqp.protocol.v10.transaction.TransactionalState;
 import com.amqp.protocol.v10.transport.*;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.CompositeByteBuf;
@@ -99,6 +101,23 @@ public class ReceiverLink extends Amqp10Link {
      */
     public void accept(long deliveryId) {
         disposition(deliveryId, Accepted.INSTANCE, true);
+    }
+
+    /**
+     * Accept a delivery within a transaction.
+     */
+    public void acceptTransactional(long deliveryId, byte[] txnId) {
+        TransactionalState txnState = new TransactionalState(txnId, Accepted.INSTANCE);
+        disposition(deliveryId, txnState, false); // Not settled until txn commits
+
+        // Track in transaction
+        Transaction10 txn = session.getTransaction(txnId);
+        if (txn != null) {
+            ReceiverDelivery delivery = unsettled.get(deliveryId);
+            if (delivery != null) {
+                txn.addAcknowledgment(null, deliveryId);
+            }
+        }
     }
 
     /**

@@ -1,9 +1,12 @@
 package com.amqp.protocol.v10.connection;
 
+import com.amqp.protocol.v10.server.Transaction10;
+import com.amqp.protocol.v10.transaction.Coordinator;
 import com.amqp.protocol.v10.transport.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -45,6 +48,10 @@ public class Amqp10Session {
     // Unsettled deliveries
     private final Map<Long, Delivery> unsettledDeliveries = new ConcurrentHashMap<>();
     private final AtomicLong nextDeliveryId = new AtomicLong(0);
+
+    // Transaction tracking
+    private final Map<String, Transaction10> transactions = new ConcurrentHashMap<>();
+    private CoordinatorLink coordinatorLink;
 
     // Error tracking
     private ErrorCondition error;
@@ -181,12 +188,25 @@ public class Amqp10Session {
         return link;
     }
 
+    public CoordinatorLink createCoordinatorLink(String name, Source source, Coordinator coordinator) {
+        long handle = nextHandle.getAndIncrement();
+        CoordinatorLink link = new CoordinatorLink(this, name, handle, source, coordinator);
+        links.put(handle, link);
+        linksByName.put(name, link);
+        this.coordinatorLink = link;
+        return link;
+    }
+
     public Amqp10Link getLink(long handle) {
         return links.get(handle);
     }
 
     public Amqp10Link getLinkByName(String name) {
         return linksByName.get(name);
+    }
+
+    public CoordinatorLink getCoordinatorLink() {
+        return coordinatorLink;
     }
 
     public void removeLink(long handle) {
@@ -219,6 +239,42 @@ public class Amqp10Session {
 
     public Delivery getDelivery(long deliveryId) {
         return unsettledDeliveries.get(deliveryId);
+    }
+
+    // Transaction management
+    public void trackTransaction(Transaction10 txn) {
+        transactions.put(txn.getTxnIdString(), txn);
+    }
+
+    public Transaction10 getTransaction(byte[] txnId) {
+        String key = bytesToHex(txnId);
+        Transaction10 txn = transactions.get(key);
+        if (txn == null) {
+            // Try exact byte match
+            for (Transaction10 t : transactions.values()) {
+                if (Arrays.equals(t.getTxnId(), txnId)) {
+                    return t;
+                }
+            }
+        }
+        return txn;
+    }
+
+    public void removeTransaction(byte[] txnId) {
+        String key = bytesToHex(txnId);
+        transactions.remove(key);
+    }
+
+    public Map<String, Transaction10> getActiveTransactions() {
+        return transactions;
+    }
+
+    private static String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : bytes) {
+            sb.append(String.format("%02x", b));
+        }
+        return sb.toString();
     }
 
     // Create performatives

@@ -140,5 +140,12 @@ public interface AmqpType {
 
         // Error (0x00000000:0x0000001D)
         long ERROR = 0x000000000000001DL;
+
+        // Transaction types (0x00000000:0x00000030 - 0x00000000:0x00000034)
+        long COORDINATOR = 0x0000000000000030L;
+        long DECLARE = 0x0000000000000031L;
+        long DISCHARGE = 0x0000000000000032L;
+        long DECLARED = 0x0000000000000033L;
+        long TRANSACTIONAL_STATE = 0x0000000000000034L;
     }
 }

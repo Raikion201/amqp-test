@@ -1,6 +1,9 @@
 package com.amqp.protocol.v10.connection;
 
+import com.amqp.protocol.v10.delivery.DeliveryState;
 import com.amqp.protocol.v10.messaging.Message10;
+import com.amqp.protocol.v10.server.Transaction10;
+import com.amqp.protocol.v10.transaction.TransactionalState;
 import com.amqp.protocol.v10.transport.*;
 import io.netty.buffer.ByteBuf;
 import org.slf4j.Logger;
@@ -78,6 +81,63 @@ public class SenderLink extends Amqp10Link {
     }
 
     /**
+     * Send a message within a transaction.
+     *
+     * @param message the message to send
+     * @param txnId the transaction ID
+     * @return the delivery for tracking, or null if no credit
+     */
+    public SenderDelivery sendTransactional(Message10 message, byte[] txnId) {
+        if (!isAttached()) {
+            throw new IllegalStateException("Link not attached");
+        }
+
+        if (!hasCredit()) {
+            log.debug("No link credit available on link {}", name);
+            return null;
+        }
+
+        // Allocate delivery
+        long deliveryId = session.nextDeliveryId();
+        long deliveryTag = nextDeliveryTag.getAndIncrement();
+        byte[] tag = longToBytes(deliveryTag);
+
+        SenderDelivery delivery = new SenderDelivery(deliveryId, tag, message, false);
+        delivery.setTxnId(txnId);
+        unsettled.put(deliveryTag, delivery);
+
+        // Create transfer with transactional state
+        Transfer transfer = new Transfer(handle);
+        transfer.setDeliveryId(deliveryId);
+        transfer.setDeliveryTag(tag);
+        transfer.setMessageFormat(Transfer.MESSAGE_FORMAT_AMQP);
+        transfer.setSettled(false); // Transactional sends are never pre-settled
+
+        // Set transactional state on the transfer
+        TransactionalState txnState = new TransactionalState(txnId);
+        transfer.setState(txnState.toDescribed());
+
+        // Encode message
+        ByteBuf payload = message.encode();
+        transfer.setPayload(payload);
+
+        // Consume credit and update delivery count
+        consumeCredit();
+        deliveryCount++;
+
+        // Store delivery for later reference
+        delivery.setTransfer(transfer);
+
+        // Track in transaction
+        Transaction10 txn = session.getTransaction(txnId);
+        if (txn != null) {
+            txn.addPublish(null, target.getAddress(), payload.array());
+        }
+
+        return delivery;
+    }
+
+    /**
      * Handle disposition from the receiver.
      */
     public void onDisposition(Disposition disposition) {
@@ -145,6 +205,7 @@ public class SenderLink extends Amqp10Link {
         private Transfer transfer;
         private Object remoteState;
         private boolean remoteSettled;
+        private byte[] txnId; // Transaction ID if transactional
 
         public SenderDelivery(long deliveryId, byte[] deliveryTag, Message10 message, boolean settled) {
             this.deliveryId = deliveryId;
@@ -195,6 +256,18 @@ public class SenderLink extends Amqp10Link {
 
         public boolean isFullySettled() {
             return localSettled && remoteSettled;
+        }
+
+        public byte[] getTxnId() {
+            return txnId;
+        }
+
+        public void setTxnId(byte[] txnId) {
+            this.txnId = txnId;
+        }
+
+        public boolean isTransactional() {
+            return txnId != null;
         }
     }
 }

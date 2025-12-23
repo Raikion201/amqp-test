@@ -97,6 +97,60 @@ public class Header implements MessageSection {
         return deliveryCount != null ? deliveryCount : 0;
     }
 
+    /**
+     * Check if this message has expired based on its TTL.
+     *
+     * @param creationTime the message creation time in milliseconds
+     * @return true if the message has expired
+     */
+    public boolean isExpired(long creationTime) {
+        if (ttl == null || ttl == 0) {
+            return false; // No TTL or TTL=0 means no expiration
+        }
+        return System.currentTimeMillis() > (creationTime + ttl);
+    }
+
+    /**
+     * Check if this message has expired based on current time.
+     * Uses now as creation time (for messages without creation time tracking).
+     *
+     * @param expirationTime the message expiration time in milliseconds
+     * @return true if the message has expired
+     */
+    public static boolean isExpiredAt(long expirationTime) {
+        if (expirationTime == 0) {
+            return false; // No expiration
+        }
+        return System.currentTimeMillis() > expirationTime;
+    }
+
+    /**
+     * Calculate the expiration time based on TTL.
+     *
+     * @param creationTime the message creation time
+     * @return the expiration time, or 0 if no TTL
+     */
+    public long getExpirationTime(long creationTime) {
+        if (ttl == null || ttl == 0) {
+            return 0; // No expiration
+        }
+        return creationTime + ttl;
+    }
+
+    /**
+     * Get remaining TTL based on creation time.
+     *
+     * @param creationTime the message creation time
+     * @return remaining TTL in milliseconds, or 0 if expired
+     */
+    public long getRemainingTtl(long creationTime) {
+        if (ttl == null || ttl == 0) {
+            return Long.MAX_VALUE; // No TTL limit
+        }
+        long remaining = (creationTime + ttl) - System.currentTimeMillis();
+        return Math.max(0, remaining);
+    }
+
     // Setters
     public Header setDurable(Boolean durable) {
         this.durable = durable;

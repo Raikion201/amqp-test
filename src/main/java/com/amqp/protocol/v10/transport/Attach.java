@@ -1,5 +1,6 @@
 package com.amqp.protocol.v10.transport;
 
+import com.amqp.protocol.v10.transaction.Coordinator;
 import com.amqp.protocol.v10.types.AmqpType;
 import com.amqp.protocol.v10.types.DescribedType;
 import com.amqp.protocol.v10.types.Symbol;
@@ -47,6 +48,7 @@ public class Attach implements Performative {
     private Integer rcvSettleMode;
     private Source source;
     private Target target;
+    private Coordinator coordinator; // Alternative to target for transaction links
     private Map<Object, Object> unsettled;
     private Boolean incompleteUnsettled;
     private Long initialDeliveryCount;
@@ -75,7 +77,12 @@ public class Attach implements Performative {
         fields.add(sndSettleMode);
         fields.add(rcvSettleMode);
         fields.add(source != null ? source.toDescribed() : null);
-        fields.add(target != null ? target.toDescribed() : null);
+        // Use coordinator if set, otherwise target
+        if (coordinator != null) {
+            fields.add(coordinator.toDescribed());
+        } else {
+            fields.add(target != null ? target.toDescribed() : null);
+        }
         fields.add(unsettled);
         fields.add(incompleteUnsettled);
         fields.add(initialDeliveryCount);
@@ -128,6 +135,14 @@ public class Attach implements Performative {
         return target;
     }
 
+    public Coordinator getCoordinator() {
+        return coordinator;
+    }
+
+    public boolean isCoordinatorLink() {
+        return coordinator != null;
+    }
+
     public Long getInitialDeliveryCount() {
         return initialDeliveryCount;
     }
@@ -154,6 +169,11 @@ public class Attach implements Performative {
 
     public Attach setTarget(Target target) {
         this.target = target;
+        return this;
+    }
+
+    public Attach setCoordinator(Coordinator coordinator) {
+        this.coordinator = coordinator;
         return this;
     }
 
@@ -208,7 +228,13 @@ public class Attach implements Performative {
 
         Object targetField = TypeDecoder.getField(fields, 6);
         if (targetField instanceof DescribedType) {
-            attach.target = Target.decode((DescribedType) targetField);
+            DescribedType targetDescribed = (DescribedType) targetField;
+            long targetDescriptor = ((Number) targetDescribed.getDescriptor()).longValue();
+            if (targetDescriptor == AmqpType.Descriptor.COORDINATOR) {
+                attach.coordinator = Coordinator.decode(targetDescribed);
+            } else {
+                attach.target = Target.decode(targetDescribed);
+            }
         }
 
         Object initialCount = TypeDecoder.getField(fields, 9);
