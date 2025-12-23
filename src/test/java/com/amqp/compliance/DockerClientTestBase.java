@@ -182,11 +182,28 @@ public abstract class DockerClientTestBase {
      * Run a client container and return its logs.
      */
     protected String runClientAndGetLogs(GenericContainer<?> client) {
+        return runClientAndGetLogs(client, 120); // Default 2 minute timeout
+    }
+
+    /**
+     * Run a client container and return its logs with custom timeout.
+     *
+     * @param client The container to run
+     * @param timeoutSeconds Maximum time to wait for completion
+     */
+    protected String runClientAndGetLogs(GenericContainer<?> client, int timeoutSeconds) {
         try {
             client.start();
 
-            // Wait for container to finish
+            // Wait for container to finish with timeout
+            long startTime = System.currentTimeMillis();
+            long timeoutMillis = timeoutSeconds * 1000L;
+
             while (client.isRunning()) {
+                if (System.currentTimeMillis() - startTime > timeoutMillis) {
+                    logger.warn("Container timed out after {} seconds", timeoutSeconds);
+                    break;
+                }
                 Thread.sleep(100);
             }
 
@@ -196,7 +213,11 @@ public abstract class DockerClientTestBase {
             logger.error("Error running client container", e);
             return "ERROR: " + e.getMessage();
         } finally {
-            client.stop();
+            try {
+                client.stop();
+            } catch (Exception e) {
+                logger.warn("Error stopping container: {}", e.getMessage());
+            }
         }
     }
 

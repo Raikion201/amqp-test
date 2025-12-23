@@ -1,0 +1,118 @@
+version: '3.8'
+
+services:
+  # Our AMQP Server
+  amqp-server:
+    build: .
+    ports:
+      - "5672:5672"
+      - "5671:5671"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "5672"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - amqp-test
+
+  # Python Pika Tests
+  pika-tests:
+    image: python:3.11-slim
+    depends_on:
+      amqp-server:
+        condition: service_healthy
+    environment:
+      - AMQP_URL=amqp://guest:guest@amqp-server:5672/
+      - RABBITMQ_HOST=amqp-server
+      - RABBITMQ_PORT=5672
+    volumes:
+      - ./test-results:/results
+    command: >
+      bash -c "
+        apt-get update && apt-get install -y git netcat-openbsd &&
+        git clone --depth 1 https://github.com/pika/pika.git /pika &&
+        cd /pika &&
+        pip install -e '.[testing]' &&
+        pip install pytest pytest-timeout &&
+        echo 'Running Pika acceptance tests against custom AMQP server...' &&
+        python -m pytest tests/acceptance/blocking_adapter_test.py -v --timeout=60 2>&1 | tee /results/pika-results.txt;
+        echo 'Pika tests completed with exit code:' \$?
+      "
+    networks:
+      - amqp-test
+
+  # Node.js amqplib Tests
+  amqplib-tests:
+    image: node:20-slim
+    depends_on:
+      amqp-server:
+        condition: service_healthy
+    environment:
+      - URL=amqp://guest:guest@amqp-server:5672
+      - AMQP_URL=amqp://guest:guest@amqp-server:5672
+    volumes:
+      - ./test-results:/results
+    command: >
+      bash -c "
+        apt-get update && apt-get install -y git netcat-openbsd &&
+        git clone --depth 1 https://github.com/amqp-node/amqplib.git /amqplib &&
+        cd /amqplib &&
+        npm install &&
+        echo 'Running amqplib tests against custom AMQP server...' &&
+        npm test 2>&1 | tee /results/amqplib-results.txt;
+        echo 'amqplib tests completed with exit code:' \$?
+      "
+    networks:
+      - amqp-test
+
+  # Go amqp091-go Tests
+  go-amqp-tests:
+    image: golang:1.21-alpine
+    depends_on:
+      amqp-server:
+        condition: service_healthy
+    environment:
+      - AMQP_URL=amqp://guest:guest@amqp-server:5672/
+    volumes:
+      - ./test-results:/results
+    command: >
+      sh -c "
+        apk add --no-cache git bash netcat-openbsd &&
+        git clone --depth 1 https://github.com/rabbitmq/amqp091-go.git /amqp091-go &&
+        cd /amqp091-go &&
+        echo 'Running Go amqp091-go integration tests against custom AMQP server...' &&
+        go test -v -tags integration -timeout 300s ./... 2>&1 | tee /results/go-amqp-results.txt;
+        echo 'Go amqp091-go tests completed with exit code:' \$?
+      "
+    networks:
+      - amqp-test
+
+  # Ruby Bunny Tests
+  bunny-tests:
+    image: ruby:3.2-slim
+    depends_on:
+      amqp-server:
+        condition: service_healthy
+    environment:
+      - RABBITMQ_HOST=amqp-server
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=guest
+      - RABBITMQ_PASSWORD=guest
+    volumes:
+      - ./test-results:/results
+    command: >
+      bash -c "
+        apt-get update && apt-get install -y git build-essential netcat-openbsd &&
+        git clone --depth 1 https://github.com/ruby-amqp/bunny.git /bunny &&
+        cd /bunny &&
+        bundle install &&
+        echo 'Running Bunny integration tests against custom AMQP server...' &&
+        bundle exec rspec spec/integration --format documentation 2>&1 | tee /results/bunny-results.txt;
+        echo 'Bunny tests completed with exit code:' \$?
+      "
+    networks:
+      - amqp-test
+
+networks:
+  amqp-test:
+    driver: bridge
