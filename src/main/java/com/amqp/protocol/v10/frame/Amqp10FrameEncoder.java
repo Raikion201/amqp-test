@@ -17,7 +17,19 @@ public class Amqp10FrameEncoder extends MessageToByteEncoder<Amqp10Frame> {
 
     @Override
     protected void encode(ChannelHandlerContext ctx, Amqp10Frame frame, ByteBuf out) throws Exception {
+        int startIdx = out.writerIndex();
         frame.encode(out);
-        logger.debug("Encoded AMQP 1.0 frame: {}", frame);
+        int bytesWritten = out.writerIndex() - startIdx;
+
+        // Print full frame hex for SASL frames
+        if (frame.isSaslFrame()) {
+            StringBuilder hex = new StringBuilder();
+            for (int i = startIdx; i < out.writerIndex(); i++) {
+                hex.append(String.format("%02x ", out.getByte(i)));
+            }
+            logger.info("Full SASL frame hex: {}", hex.toString());
+        }
+
+        logger.info("Encoded AMQP 1.0 frame: {} ({} bytes)", frame, bytesWritten);
     }
 }

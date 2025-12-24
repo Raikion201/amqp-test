@@ -3,6 +3,7 @@ package com.amqp.protocol.v10.server;
 import com.amqp.protocol.v10.connection.*;
 import com.amqp.protocol.v10.delivery.*;
 import com.amqp.protocol.v10.frame.Amqp10Frame;
+import com.amqp.protocol.v10.frame.Amqp10ProtocolDecoder;
 import com.amqp.protocol.v10.frame.FrameType;
 import com.amqp.protocol.v10.messaging.Message10;
 import com.amqp.protocol.v10.transport.*;
@@ -81,7 +82,7 @@ public class Amqp10ConnectionHandler extends ChannelInboundHandlerAdapter {
             int channel = frame.getChannel();
             ByteBuf body = frame.content();
 
-            if (!body.isReadable()) {
+            if (body == null || !body.isReadable()) {
                 // Empty frame (heartbeat)
                 log.trace("Received heartbeat frame");
                 return;
@@ -442,7 +443,16 @@ public class Amqp10ConnectionHandler extends ChannelInboundHandlerAdapter {
 
     @Override
     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
-        if (evt instanceof IdleStateEvent) {
+        if (evt instanceof Amqp10ProtocolDecoder.ProtocolHeaderEvent) {
+            Amqp10ProtocolDecoder.ProtocolHeaderEvent headerEvent =
+                    (Amqp10ProtocolDecoder.ProtocolHeaderEvent) evt;
+            if (headerEvent.getType() == Amqp10ProtocolDecoder.ProtocolType.AMQP) {
+                // AMQP header exchanged, update connection state
+                connection.onHeaderReceived();
+                connection.onHeaderSent();
+                log.debug("AMQP header exchange complete, connection state: {}", connection.getState());
+            }
+        } else if (evt instanceof IdleStateEvent) {
             // Send empty frame as heartbeat
             Amqp10Frame heartbeat = new Amqp10Frame(FrameType.AMQP, 0,
                     ctx.alloc().buffer(0));

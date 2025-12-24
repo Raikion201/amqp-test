@@ -4,6 +4,7 @@ import com.amqp.protocol.v10.types.AmqpType;
 import com.amqp.protocol.v10.types.DescribedType;
 import com.amqp.protocol.v10.types.Symbol;
 import com.amqp.protocol.v10.types.TypeDecoder;
+import com.amqp.protocol.v10.types.UInt;
 
 import java.util.*;
 
@@ -119,9 +120,11 @@ public class Target {
     public DescribedType toDescribed() {
         List<Object> fields = new ArrayList<>();
         fields.add(address);
-        fields.add(durable);
+        // durable is terminus-durability (uint) per AMQP 1.0 spec
+        fields.add(durable == null ? null : UInt.valueOf(durable));
         fields.add(expiryPolicy);
-        fields.add(timeout);
+        // timeout is seconds (uint) per AMQP 1.0 spec
+        fields.add(timeout == null ? null : UInt.valueOf(timeout));
         fields.add(dynamic);
         fields.add(dynamicNodeProperties);
         fields.add(capabilities);

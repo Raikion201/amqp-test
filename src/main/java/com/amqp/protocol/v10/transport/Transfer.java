@@ -3,6 +3,8 @@ package com.amqp.protocol.v10.transport;
 import com.amqp.protocol.v10.types.AmqpType;
 import com.amqp.protocol.v10.types.DescribedType;
 import com.amqp.protocol.v10.types.TypeDecoder;
+import com.amqp.protocol.v10.types.UByte;
+import com.amqp.protocol.v10.types.UInt;
 import io.netty.buffer.ByteBuf;
 
 import java.util.ArrayList;
@@ -60,13 +62,17 @@ public class Transfer implements Performative {
     @Override
     public List<Object> getFields() {
         List<Object> fields = new ArrayList<>();
-        fields.add(handle);
-        fields.add(deliveryId);
+        // handle is uint per AMQP 1.0 spec
+        fields.add(UInt.valueOf(handle));
+        // delivery-id is delivery-number (uint) per AMQP 1.0 spec
+        fields.add(deliveryId == null ? null : UInt.valueOf(deliveryId));
         fields.add(deliveryTag);
-        fields.add(messageFormat);
+        // message-format is uint per AMQP 1.0 spec
+        fields.add(messageFormat == null ? null : UInt.valueOf(messageFormat));
         fields.add(settled);
         fields.add(more);
-        fields.add(rcvSettleMode);
+        // rcv-settle-mode is ubyte per AMQP 1.0 spec
+        fields.add(rcvSettleMode == null ? null : UByte.valueOf(rcvSettleMode));
         fields.add(state);
         fields.add(resume);
         fields.add(aborted);

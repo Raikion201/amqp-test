@@ -4,6 +4,8 @@ import com.amqp.protocol.v10.types.AmqpType;
 import com.amqp.protocol.v10.types.DescribedType;
 import com.amqp.protocol.v10.types.Symbol;
 import com.amqp.protocol.v10.types.TypeDecoder;
+import com.amqp.protocol.v10.types.UInt;
+import com.amqp.protocol.v10.types.UShort;
 
 import java.util.*;
 
@@ -51,11 +53,16 @@ public class Begin implements Performative {
     @Override
     public List<Object> getFields() {
         List<Object> fields = new ArrayList<>();
-        fields.add(remoteChannel);
-        fields.add(nextOutgoingId);
-        fields.add(incomingWindow);
-        fields.add(outgoingWindow);
-        fields.add(handleMax == DEFAULT_HANDLE_MAX ? null : handleMax);
+        // remote-channel is ushort per AMQP 1.0 spec
+        fields.add(remoteChannel == null ? null : UShort.valueOf(remoteChannel));
+        // next-outgoing-id is transfer-number (uint) per AMQP 1.0 spec
+        fields.add(UInt.valueOf(nextOutgoingId));
+        // incoming-window is uint per AMQP 1.0 spec
+        fields.add(UInt.valueOf(incomingWindow));
+        // outgoing-window is uint per AMQP 1.0 spec
+        fields.add(UInt.valueOf(outgoingWindow));
+        // handle-max is handle (uint) per AMQP 1.0 spec
+        fields.add(handleMax == DEFAULT_HANDLE_MAX ? null : UInt.valueOf(handleMax));
         fields.add(offeredCapabilities);
         fields.add(desiredCapabilities);
         fields.add(properties);

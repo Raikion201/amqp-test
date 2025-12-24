@@ -44,15 +44,23 @@ public class Transaction10 {
     // Session association
     private final Object session;
 
-    // Timestamp
+    // Timestamp and timeout
     private final long createdAt;
+    private volatile long timeoutMs = 300000; // Default 5 minutes
+    private volatile long lastActivityAt;
 
     public Transaction10(Object session) {
+        this(session, 300000);
+    }
+
+    public Transaction10(Object session, long timeoutMs) {
         this.session = session;
+        this.timeoutMs = timeoutMs;
         this.txnId = generateTxnId();
         this.txnIdString = bytesToHex(txnId);
         this.createdAt = System.currentTimeMillis();
-        log.debug("Created transaction: {}", txnIdString);
+        this.lastActivityAt = createdAt;
+        log.debug("Created transaction: {} with timeout {}ms", txnIdString, timeoutMs);
     }
 
     /**
@@ -104,7 +112,73 @@ public class Transaction10 {
      * Check if transaction is still active.
      */
     public boolean isActive() {
-        return state == State.DECLARED;
+        return state == State.DECLARED && !isTimedOut();
+    }
+
+    /**
+     * Check if the transaction has timed out.
+     */
+    public boolean isTimedOut() {
+        if (timeoutMs <= 0) {
+            return false; // No timeout
+        }
+        return System.currentTimeMillis() - createdAt > timeoutMs;
+    }
+
+    /**
+     * Get remaining time before timeout.
+     */
+    public long getRemainingTimeMs() {
+        if (timeoutMs <= 0) {
+            return Long.MAX_VALUE;
+        }
+        long elapsed = System.currentTimeMillis() - createdAt;
+        return Math.max(0, timeoutMs - elapsed);
+    }
+
+    /**
+     * Update last activity time (call this when operations are performed).
+     */
+    public void touch() {
+        this.lastActivityAt = System.currentTimeMillis();
+    }
+
+    /**
+     * Get idle time since last activity.
+     */
+    public long getIdleTimeMs() {
+        return System.currentTimeMillis() - lastActivityAt;
+    }
+
+    /**
+     * Set the timeout value.
+     */
+    public void setTimeout(long timeoutMs) {
+        this.timeoutMs = timeoutMs;
+    }
+
+    /**
+     * Get the timeout value.
+     */
+    public long getTimeout() {
+        return timeoutMs;
+    }
+
+    /**
+     * Rollback if timed out, return true if it was timed out.
+     */
+    public boolean rollbackIfTimedOut() {
+        if (isTimedOut() && state == State.DECLARED) {
+            log.warn("Transaction {} timed out after {}ms, rolling back",
+                    txnIdString, System.currentTimeMillis() - createdAt);
+            try {
+                rollback();
+            } catch (Exception e) {
+                log.error("Error rolling back timed out transaction {}", txnIdString, e);
+            }
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -114,6 +188,11 @@ public class Transaction10 {
         if (state != State.DECLARED) {
             throw new IllegalStateException("Transaction not active: " + state);
         }
+        if (isTimedOut()) {
+            rollbackIfTimedOut();
+            throw new IllegalStateException("Transaction timed out: " + txnIdString);
+        }
+        touch();
         publishedMessages.add(new TransactionalDelivery(delivery, address, messageData));
         log.debug("Transaction {} added publish to {}", txnIdString, address);
     }
@@ -125,6 +204,11 @@ public class Transaction10 {
         if (state != State.DECLARED) {
             throw new IllegalStateException("Transaction not active: " + state);
         }
+        if (isTimedOut()) {
+            rollbackIfTimedOut();
+            throw new IllegalStateException("Transaction timed out: " + txnIdString);
+        }
+        touch();
         acknowledgments.add(new TransactionalAck(delivery, deliveryId));
         log.debug("Transaction {} added ack for delivery {}", txnIdString, deliveryId);
     }
@@ -135,6 +219,10 @@ public class Transaction10 {
     public void commit() throws Exception {
         if (state != State.DECLARED) {
             throw new IllegalStateException("Transaction not in DECLARED state: " + state);
+        }
+        if (isTimedOut()) {
+            rollbackIfTimedOut();
+            throw new IllegalStateException("Transaction timed out before commit: " + txnIdString);
         }
 
         state = State.DISCHARGING;

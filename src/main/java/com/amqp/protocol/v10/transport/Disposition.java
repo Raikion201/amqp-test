@@ -3,6 +3,7 @@ package com.amqp.protocol.v10.transport;
 import com.amqp.protocol.v10.types.AmqpType;
 import com.amqp.protocol.v10.types.DescribedType;
 import com.amqp.protocol.v10.types.TypeDecoder;
+import com.amqp.protocol.v10.types.UInt;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -45,8 +46,10 @@ public class Disposition implements Performative {
     public List<Object> getFields() {
         List<Object> fields = new ArrayList<>();
         fields.add(role);
-        fields.add(first);
-        fields.add(last);
+        // first is delivery-number (uint) per AMQP 1.0 spec
+        fields.add(UInt.valueOf(first));
+        // last is delivery-number (uint) per AMQP 1.0 spec
+        fields.add(last == null ? null : UInt.valueOf(last));
         fields.add(settled);
         fields.add(state);
         fields.add(batchable);

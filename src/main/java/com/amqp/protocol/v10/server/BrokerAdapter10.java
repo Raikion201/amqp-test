@@ -6,11 +6,15 @@ import com.amqp.model.Queue;
 import com.amqp.protocol.v10.connection.*;
 import com.amqp.protocol.v10.delivery.Accepted;
 import com.amqp.protocol.v10.delivery.DeliveryState;
+import com.amqp.protocol.v10.frame.Amqp10Frame;
+import com.amqp.protocol.v10.frame.FrameType;
 import com.amqp.protocol.v10.messaging.*;
 import com.amqp.protocol.v10.transaction.Coordinator;
 import com.amqp.protocol.v10.transaction.TransactionalState;
 import com.amqp.protocol.v10.transport.*;
 import com.amqp.server.AmqpBroker;
+import io.netty.buffer.ByteBuf;
+import io.netty.channel.Channel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,8 +41,8 @@ public class BrokerAdapter10 {
     private final Map<String, String> linkToQueue = new ConcurrentHashMap<>();
     private final Map<String, String> linkToExchange = new ConcurrentHashMap<>();
 
-    // Consumer tracking
-    private final Map<String, ReceiverLink> activeConsumers = new ConcurrentHashMap<>();
+    // Consumer tracking - SenderLinks that send messages to clients (consuming from queues)
+    private final Map<String, SenderLink> activeConsumers = new ConcurrentHashMap<>();
 
     // Transaction tracking - messages staged for transactional commit
     private final Map<String, List<StagedMessage>> stagedMessages = new ConcurrentHashMap<>();
@@ -381,7 +385,7 @@ public class BrokerAdapter10 {
 
     private void registerConsumer(Amqp10Session session, SenderLink link, String queueName) {
         // Store reference for message delivery
-        activeConsumers.put(link.getName(), null); // Placeholder
+        activeConsumers.put(link.getName(), link);
 
         // Start delivering messages when credit is available
         log.debug("Registered consumer on queue '{}' for link '{}'", queueName, link.getName());
@@ -422,6 +426,8 @@ public class BrokerAdapter10 {
                     break;
                 }
 
+                // Actually send the Transfer frame over the wire
+                sendTransfer(session, delivery.getTransfer());
                 log.debug("Delivered message to link '{}'", link.getName());
 
             } catch (Exception e) {
@@ -565,8 +571,45 @@ public class BrokerAdapter10 {
                         : Accepted.INSTANCE,
                 settled);
 
-        // The handler will send this
-        // For now we rely on the connection handler to send it
+        // Send the disposition frame
+        sendPerformative(session, disposition);
+    }
+
+    /**
+     * Send a Transfer frame over the wire.
+     */
+    private void sendTransfer(Amqp10Session session, Transfer transfer) {
+        Channel channel = connection.getChannel();
+        ByteBuf body = channel.alloc().buffer();
+
+        // Encode transfer performative
+        transfer.encode(body);
+
+        // Append message payload
+        ByteBuf payload = transfer.getPayload();
+        if (payload != null && payload.isReadable()) {
+            body.writeBytes(payload);
+        }
+
+        Amqp10Frame frame = new Amqp10Frame(FrameType.AMQP, session.getLocalChannel(), body);
+        channel.writeAndFlush(frame);
+
+        log.trace("Sent Transfer on channel {}", session.getLocalChannel());
+    }
+
+    /**
+     * Send a performative frame over the wire.
+     */
+    private void sendPerformative(Amqp10Session session, Performative performative) {
+        Channel channel = connection.getChannel();
+        ByteBuf body = channel.alloc().buffer();
+
+        performative.encode(body);
+
+        Amqp10Frame frame = new Amqp10Frame(FrameType.AMQP, session.getLocalChannel(), body);
+        channel.writeAndFlush(frame);
+
+        log.trace("Sent {} on channel {}", performative.getClass().getSimpleName(), session.getLocalChannel());
     }
 
     // Transaction support methods
@@ -575,10 +618,19 @@ public class BrokerAdapter10 {
      * Stage a message for transactional publish.
      */
     public void stageMessage(String txnKey, String address, Message message, boolean isExchange) {
+        stageMessage(txnKey, address, message, isExchange, null);
+    }
+
+    /**
+     * Stage a message for transactional publish with routing key.
+     */
+    public void stageMessage(String txnKey, String address, Message message,
+                              boolean isExchange, String routingKey) {
         List<StagedMessage> staged = stagedMessages.get(txnKey);
         if (staged != null) {
-            staged.add(new StagedMessage(address, message, isExchange));
-            log.debug("Staged message for transaction {} to {}", txnKey, address);
+            staged.add(new StagedMessage(address, message, isExchange, routingKey));
+            log.debug("Staged message for transaction {} to {} (routingKey: {})",
+                      txnKey, address, routingKey);
         } else {
             log.warn("Unknown transaction: {}", txnKey);
         }
@@ -608,7 +660,7 @@ public class BrokerAdapter10 {
         if (messages != null) {
             for (StagedMessage staged : messages) {
                 if (staged.isExchange) {
-                    String routingKey = ""; // TODO: Extract from message
+                    String routingKey = staged.routingKey != null ? staged.routingKey : "";
                     publishToExchange(staged.address, routingKey, staged.message);
                 } else {
                     publishToQueue(staged.address, staged.message);
@@ -674,14 +726,17 @@ public class BrokerAdapter10 {
             // Convert to internal message format
             Message message = convertToInternalMessage(message10);
 
+            // Extract routing key from message
+            String routingKey = getRoutingKey(message10);
+
             // Stage for transactional commit
             String exchangeName = linkToExchange.get(linkName);
             if (exchangeName != null) {
-                stageMessage(txnKey, exchangeName, message, true);
+                stageMessage(txnKey, exchangeName, message, true, routingKey);
             } else {
                 String queueName = linkToQueue.get(linkName);
                 if (queueName != null) {
-                    stageMessage(txnKey, queueName, message, false);
+                    stageMessage(txnKey, queueName, message, false, null);
                 }
             }
 
@@ -711,11 +766,17 @@ public class BrokerAdapter10 {
         final String address;
         final Message message;
         final boolean isExchange;
+        final String routingKey;
 
         StagedMessage(String address, Message message, boolean isExchange) {
+            this(address, message, isExchange, null);
+        }
+
+        StagedMessage(String address, Message message, boolean isExchange, String routingKey) {
             this.address = address;
             this.message = message;
             this.isExchange = isExchange;
+            this.routingKey = routingKey;
         }
     }
 

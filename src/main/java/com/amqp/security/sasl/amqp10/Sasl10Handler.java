@@ -12,6 +12,7 @@ import com.amqp.security.sasl.SaslMechanism;
 import com.amqp.security.sasl.SaslNegotiator;
 import com.amqp.security.tls.MutualTlsHandler;
 import io.netty.buffer.ByteBuf;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.util.AttributeKey;
@@ -25,7 +26,8 @@ import java.util.List;
  * Handler for AMQP 1.0 SASL authentication layer.
  *
  * This handler processes SASL frames before normal AMQP frames.
- * After successful authentication, it removes itself from the pipeline.
+ * After successful authentication, it notifies the protocol decoder
+ * and passes through subsequent AMQP frames.
  */
 public class Sasl10Handler extends ChannelInboundHandlerAdapter {
 
@@ -39,6 +41,7 @@ public class Sasl10Handler extends ChannelInboundHandlerAdapter {
 
     private SaslContext saslContext;
     private boolean saslComplete = false;
+    private boolean saslStarted = false;
 
     public Sasl10Handler(SaslNegotiator negotiator, boolean required) {
         this.negotiator = negotiator;
@@ -64,6 +67,24 @@ public class Sasl10Handler extends ChannelInboundHandlerAdapter {
     }
 
     @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
+        if (evt instanceof Amqp10ProtocolDecoder.ProtocolHeaderEvent) {
+            Amqp10ProtocolDecoder.ProtocolHeaderEvent headerEvent =
+                    (Amqp10ProtocolDecoder.ProtocolHeaderEvent) evt;
+
+            if (headerEvent.getType() == Amqp10ProtocolDecoder.ProtocolType.SASL) {
+                // Protocol decoder received SASL header - send mechanisms
+                log.info("Received SASL header event, sending mechanisms");
+                saslStarted = true;
+                sendSaslMechanisms(ctx);
+                return;
+            }
+        }
+
+        super.userEventTriggered(ctx, evt);
+    }
+
+    @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
         if (saslComplete) {
             // SASL is complete, pass through
@@ -73,11 +94,12 @@ public class Sasl10Handler extends ChannelInboundHandlerAdapter {
 
         if (msg instanceof ByteBuf) {
             ByteBuf buf = (ByteBuf) msg;
-            // Check for SASL protocol header
+            // Check for SASL protocol header (legacy direct handling)
             if (isSaslHeader(buf)) {
                 handleSaslHeader(ctx, buf);
                 return;
             }
+            // Otherwise pass through (could be AMQP header after SASL)
         }
 
         if (msg instanceof Amqp10Frame) {
@@ -89,8 +111,8 @@ public class Sasl10Handler extends ChannelInboundHandlerAdapter {
         }
 
         // Not a SASL message
-        if (required && !saslComplete) {
-            log.warn("SASL required but received non-SASL message");
+        if (required && !saslComplete && saslStarted) {
+            log.warn("SASL required but received non-SASL message during negotiation");
             ctx.close();
             return;
         }
@@ -113,7 +135,8 @@ public class Sasl10Handler extends ChannelInboundHandlerAdapter {
         // Skip the header
         buf.skipBytes(8);
 
-        log.debug("Received SASL protocol header");
+        log.debug("Received SASL protocol header directly");
+        saslStarted = true;
 
         // Send our SASL header back
         ByteBuf response = ctx.alloc().buffer(8);
@@ -121,11 +144,21 @@ public class Sasl10Handler extends ChannelInboundHandlerAdapter {
         ctx.writeAndFlush(response);
 
         // Send SASL mechanisms
+        sendSaslMechanisms(ctx);
+    }
+
+    private void sendSaslMechanisms(ChannelHandlerContext ctx) {
         List<String> mechanisms = negotiator.getApplicableMechanisms(saslContext);
+
+        if (mechanisms.isEmpty()) {
+            log.warn("No applicable SASL mechanisms available! TLS enabled: {}, context: {}",
+                    saslContext.isTlsEnabled(), saslContext);
+        }
+
         SaslMechanismsFrame mechanismsFrame = new SaslMechanismsFrame(mechanisms);
         sendSaslFrame(ctx, mechanismsFrame);
 
-        log.debug("Sent SASL mechanisms: {}", mechanisms);
+        log.info("Sent SASL mechanisms: {}", mechanisms);
     }
 
     private void handleSaslFrame(ChannelHandlerContext ctx, Amqp10Frame frame) {
@@ -163,10 +196,14 @@ public class Sasl10Handler extends ChannelInboundHandlerAdapter {
     }
 
     private void handleSaslInit(ChannelHandlerContext ctx, SaslInitFrame init) {
-        log.debug("Received SASL init: mechanism={}", init.getMechanismName());
+        log.info("Received SASL init: mechanism={}", init.getMechanismName());
 
         SaslMechanism.SaslResult result = negotiator.handleInit(
                 saslContext, init.getMechanismName(), init.getInitialResponse());
+
+        log.info("SASL result: complete={}, success={}, username={}",
+                result.isComplete(), result.isSuccess(),
+                result.isComplete() && result.isSuccess() ? result.getUsername() : "N/A");
 
         processSaslResult(ctx, result);
     }
@@ -196,7 +233,8 @@ public class Sasl10Handler extends ChannelInboundHandlerAdapter {
                 // Mark as complete
                 saslComplete = true;
 
-                // The protocol decoder will handle switching to AMQP frames
+                // Notify protocol decoder to expect AMQP header
+                notifyProtocolDecoder(ctx);
 
             } else {
                 // Authentication failed
@@ -231,14 +269,35 @@ public class Sasl10Handler extends ChannelInboundHandlerAdapter {
         }
     }
 
+    private void notifyProtocolDecoder(ChannelHandlerContext ctx) {
+        // Find the protocol decoder and notify it that SASL is complete
+        ChannelHandler handler = ctx.pipeline().get("protocol");
+        if (handler instanceof Amqp10ProtocolDecoder) {
+            Amqp10ProtocolDecoder decoder = (Amqp10ProtocolDecoder) handler;
+            decoder.saslComplete();
+            log.debug("Notified protocol decoder that SASL is complete");
+        } else {
+            log.debug("Protocol decoder not found in pipeline (may have been removed)");
+        }
+    }
+
     private void sendSaslFrame(ChannelHandlerContext ctx, SaslPerformative performative) {
         ByteBuf body = ctx.alloc().buffer();
         TypeEncoder.encode(performative.toDescribed(), body);
 
+        // Debug: print hex bytes of the body
+        if (log.isDebugEnabled()) {
+            StringBuilder hex = new StringBuilder();
+            for (int i = body.readerIndex(); i < body.writerIndex(); i++) {
+                hex.append(String.format("%02x ", body.getByte(i)));
+            }
+            log.debug("SASL frame body hex: {}", hex.toString());
+        }
+
         Amqp10Frame frame = new Amqp10Frame(FrameType.SASL, 0, body);
         ctx.writeAndFlush(frame);
 
-        log.trace("Sent SASL frame: {}", performative.getClass().getSimpleName());
+        log.info("Sent SASL frame: {} ({} bytes)", performative.getClass().getSimpleName(), frame.getSize());
     }
 
     public boolean isSaslComplete() {
@@ -251,5 +310,11 @@ public class Sasl10Handler extends ChannelInboundHandlerAdapter {
 
     public static String getAuthenticatedUser(ChannelHandlerContext ctx) {
         return ctx.channel().attr(AUTH_USER_KEY).get();
+    }
+
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+        log.error("Exception in SASL handler", cause);
+        ctx.close();
     }
 }

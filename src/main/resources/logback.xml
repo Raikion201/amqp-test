@@ -21,6 +21,7 @@
     </appender>
     
     <logger name="com.amcp" level="DEBUG"/>
+    <logger name="com.amqp" level="DEBUG"/>
     <logger name="io.netty" level="INFO"/>
     <logger name="com.zaxxer.hikari" level="INFO"/>
     

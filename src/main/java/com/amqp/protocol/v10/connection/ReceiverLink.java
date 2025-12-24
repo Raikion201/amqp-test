@@ -36,6 +36,11 @@ public class ReceiverLink extends Amqp10Link {
     // Prefetch credit
     private long prefetchCredit = 100;
 
+    // Security limits
+    private long maxMessageSize = 64 * 1024 * 1024; // 64 MB default
+    private long maxAssemblyTimeMs = 30000; // 30 seconds default
+    private long currentDeliveryStartTime;
+
     public ReceiverLink(Amqp10Session session, String name, long handle,
                         Source source, Target target) {
         super(session, name, handle, true, source, target); // role = true = receiver
@@ -51,8 +56,20 @@ public class ReceiverLink extends Amqp10Link {
 
     /**
      * Handle an incoming transfer.
+     *
+     * @return null if accepted, or an ErrorCondition if rejected
      */
-    public void onTransfer(Transfer transfer, ByteBuf payload) {
+    public ErrorCondition onTransfer(Transfer transfer, ByteBuf payload) {
+        // Check for aborted transfer
+        if (transfer.isAborted()) {
+            if (currentDelivery != null) {
+                log.debug("Transfer aborted for delivery {}", currentDelivery.getDeliveryId());
+                currentDelivery.release();
+                currentDelivery = null;
+            }
+            return null;
+        }
+
         if (transfer.getDeliveryId() != null && currentDelivery == null) {
             // Start of a new delivery
             currentDelivery = new ReceiverDelivery(
@@ -60,10 +77,37 @@ public class ReceiverLink extends Amqp10Link {
                     transfer.getDeliveryTag(),
                     transfer.isSettled()
             );
+            currentDeliveryStartTime = System.currentTimeMillis();
+        } else if (currentDelivery != null) {
+            // Check multi-frame assembly timeout
+            long elapsed = System.currentTimeMillis() - currentDeliveryStartTime;
+            if (elapsed > maxAssemblyTimeMs) {
+                log.warn("Multi-frame message assembly timeout after {}ms for delivery {}",
+                        elapsed, currentDelivery.getDeliveryId());
+                currentDelivery.release();
+                currentDelivery = null;
+                return new ErrorCondition(
+                        ErrorCondition.RESOURCE_LIMIT_EXCEEDED,
+                        "Message assembly timeout exceeded"
+                );
+            }
         }
 
         // Add payload to current delivery
         if (payload != null && payload.isReadable()) {
+            // Check message size limit
+            long currentSize = currentDelivery.getPayloadSize();
+            long newSize = currentSize + payload.readableBytes();
+            if (newSize > maxMessageSize) {
+                log.warn("Message size {} exceeds limit {} for delivery {}",
+                        newSize, maxMessageSize, currentDelivery.getDeliveryId());
+                currentDelivery.release();
+                currentDelivery = null;
+                return new ErrorCondition(
+                        ErrorCondition.MESSAGE_SIZE_EXCEEDED,
+                        "Message size " + newSize + " exceeds limit " + maxMessageSize
+                );
+            }
             currentDelivery.addPayload(payload);
         }
 
@@ -94,6 +138,30 @@ public class ReceiverLink extends Amqp10Link {
 
             currentDelivery = null;
         }
+
+        return null;
+    }
+
+    /**
+     * Check and cleanup any timed-out partial deliveries.
+     *
+     * @return ErrorCondition if a delivery was timed out, null otherwise
+     */
+    public ErrorCondition checkPartialDeliveryTimeout() {
+        if (currentDelivery != null) {
+            long elapsed = System.currentTimeMillis() - currentDeliveryStartTime;
+            if (elapsed > maxAssemblyTimeMs) {
+                log.warn("Cleaning up timed-out partial delivery {} after {}ms",
+                        currentDelivery.getDeliveryId(), elapsed);
+                currentDelivery.release();
+                currentDelivery = null;
+                return new ErrorCondition(
+                        ErrorCondition.RESOURCE_LIMIT_EXCEEDED,
+                        "Partial message assembly timed out"
+                );
+            }
+        }
+        return null;
     }
 
     /**
@@ -197,6 +265,29 @@ public class ReceiverLink extends Amqp10Link {
         this.prefetchCredit = prefetchCredit;
     }
 
+    public long getMaxMessageSize() {
+        return maxMessageSize;
+    }
+
+    public void setMaxMessageSize(long maxMessageSize) {
+        this.maxMessageSize = maxMessageSize;
+    }
+
+    public long getMaxAssemblyTimeMs() {
+        return maxAssemblyTimeMs;
+    }
+
+    public void setMaxAssemblyTimeMs(long maxAssemblyTimeMs) {
+        this.maxAssemblyTimeMs = maxAssemblyTimeMs;
+    }
+
+    /**
+     * Check if there is a partial delivery in progress.
+     */
+    public boolean hasPartialDelivery() {
+        return currentDelivery != null;
+    }
+
     /**
      * Represents a delivery received on this link.
      */
@@ -223,6 +314,10 @@ public class ReceiverLink extends Amqp10Link {
 
         public ByteBuf getPayload() {
             return payloadBuffer;
+        }
+
+        public long getPayloadSize() {
+            return payloadBuffer != null ? payloadBuffer.readableBytes() : 0;
         }
 
         public long getDeliveryId() {

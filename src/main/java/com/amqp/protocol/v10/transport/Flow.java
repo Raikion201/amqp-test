@@ -4,6 +4,7 @@ import com.amqp.protocol.v10.types.AmqpType;
 import com.amqp.protocol.v10.types.DescribedType;
 import com.amqp.protocol.v10.types.Symbol;
 import com.amqp.protocol.v10.types.TypeDecoder;
+import com.amqp.protocol.v10.types.UInt;
 
 import java.util.*;
 
@@ -55,14 +56,22 @@ public class Flow implements Performative {
     @Override
     public List<Object> getFields() {
         List<Object> fields = new ArrayList<>();
-        fields.add(nextIncomingId);
-        fields.add(incomingWindow);
-        fields.add(nextOutgoingId);
-        fields.add(outgoingWindow);
-        fields.add(handle);
-        fields.add(deliveryCount);
-        fields.add(linkCredit);
-        fields.add(available);
+        // next-incoming-id is transfer-number (uint) per AMQP 1.0 spec
+        fields.add(nextIncomingId == null ? null : UInt.valueOf(nextIncomingId));
+        // incoming-window is uint per AMQP 1.0 spec
+        fields.add(UInt.valueOf(incomingWindow));
+        // next-outgoing-id is transfer-number (uint) per AMQP 1.0 spec
+        fields.add(UInt.valueOf(nextOutgoingId));
+        // outgoing-window is uint per AMQP 1.0 spec
+        fields.add(UInt.valueOf(outgoingWindow));
+        // handle is uint per AMQP 1.0 spec
+        fields.add(handle == null ? null : UInt.valueOf(handle));
+        // delivery-count is sequence-no (uint) per AMQP 1.0 spec
+        fields.add(deliveryCount == null ? null : UInt.valueOf(deliveryCount));
+        // link-credit is uint per AMQP 1.0 spec
+        fields.add(linkCredit == null ? null : UInt.valueOf(linkCredit));
+        // available is uint per AMQP 1.0 spec
+        fields.add(available == null ? null : UInt.valueOf(available));
         fields.add(drain);
         fields.add(echo);
         fields.add(properties);

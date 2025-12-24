@@ -6,6 +6,7 @@ import com.amqp.protocol.v10.server.Amqp10Server;
 import com.amqp.server.AmqpBroker;
 import io.vertx.core.Vertx;
 import io.vertx.proton.*;
+import io.vertx.proton.ProtonClientOptions;
 import org.apache.qpid.proton.amqp.messaging.AmqpValue;
 import org.apache.qpid.proton.amqp.messaging.Section;
 import org.apache.qpid.proton.message.Message;
@@ -84,6 +85,14 @@ public class Amqp10ProtocolComplianceTest {
         log.info("AMQP 1.0 Test Server stopped");
     }
 
+    /**
+     * Create ProtonClientOptions with ANONYMOUS SASL mechanism enabled.
+     */
+    private ProtonClientOptions createClientOptions() {
+        return new ProtonClientOptions()
+                .addEnabledSaslMechanism("ANONYMOUS");
+    }
+
     @Test
     @Order(1)
     @DisplayName("Test: AMQP 1.0 connection establishment")
@@ -96,7 +105,7 @@ public class Amqp10ProtocolComplianceTest {
 
         ProtonClient client = ProtonClient.create(vertx);
 
-        client.connect(TEST_HOST, TEST_PORT, res -> {
+        client.connect(createClientOptions(), TEST_HOST, TEST_PORT, res -> {
             if (res.succeeded()) {
                 ProtonConnection conn = res.result();
                 conn.openHandler(openRes -> {
@@ -138,7 +147,7 @@ public class Amqp10ProtocolComplianceTest {
 
         ProtonClient client = ProtonClient.create(vertx);
 
-        client.connect(TEST_HOST, TEST_PORT, res -> {
+        client.connect(createClientOptions(), TEST_HOST, TEST_PORT, res -> {
             if (res.succeeded()) {
                 ProtonConnection conn = res.result();
                 conn.openHandler(openRes -> {
@@ -188,7 +197,7 @@ public class Amqp10ProtocolComplianceTest {
 
         ProtonClient client = ProtonClient.create(vertx);
 
-        client.connect(TEST_HOST, TEST_PORT, res -> {
+        client.connect(createClientOptions(), TEST_HOST, TEST_PORT, res -> {
             if (res.succeeded()) {
                 ProtonConnection conn = res.result();
                 conn.openHandler(openRes -> {
@@ -238,7 +247,7 @@ public class Amqp10ProtocolComplianceTest {
 
         ProtonClient client = ProtonClient.create(vertx);
 
-        client.connect(TEST_HOST, TEST_PORT, res -> {
+        client.connect(createClientOptions(), TEST_HOST, TEST_PORT, res -> {
             if (res.succeeded()) {
                 ProtonConnection conn = res.result();
                 conn.openHandler(openRes -> {
@@ -288,7 +297,7 @@ public class Amqp10ProtocolComplianceTest {
 
         ProtonClient client = ProtonClient.create(vertx);
 
-        client.connect(TEST_HOST, TEST_PORT, res -> {
+        client.connect(createClientOptions(), TEST_HOST, TEST_PORT, res -> {
             if (res.succeeded()) {
                 ProtonConnection conn = res.result();
                 conn.openHandler(openRes -> {
@@ -355,7 +364,7 @@ public class Amqp10ProtocolComplianceTest {
 
         // First, send a message
         CountDownLatch sendDone = new CountDownLatch(1);
-        client.connect(TEST_HOST, TEST_PORT, res -> {
+        client.connect(createClientOptions(), TEST_HOST, TEST_PORT, res -> {
             if (res.succeeded()) {
                 ProtonConnection conn = res.result();
                 conn.openHandler(openRes -> {
@@ -390,22 +399,27 @@ public class Amqp10ProtocolComplianceTest {
         assertTrue(sendDone.await(TIMEOUT_SECONDS, TimeUnit.SECONDS), "Send timeout");
 
         // Now, receive the message
-        client.connect(TEST_HOST, TEST_PORT, res -> {
+        client.connect(createClientOptions(), TEST_HOST, TEST_PORT, res -> {
             if (res.succeeded()) {
                 ProtonConnection conn = res.result();
                 conn.openHandler(openRes -> {
                     if (openRes.succeeded()) {
                         ProtonReceiver receiver = conn.createReceiver(queueName);
+                        receiver.setPrefetch(0); // Disable auto prefetch to use manual credit
                         receiver.handler((delivery, msg) -> {
                             Section body = msg.getBody();
+                            String value = null;
                             if (body instanceof AmqpValue) {
-                                Object value = ((AmqpValue) body).getValue();
-                                receivedMessage.set(value.toString());
-                                log.info("Message received: {}", value);
+                                value = ((AmqpValue) body).getValue().toString();
+                            } else if (body instanceof org.apache.qpid.proton.amqp.messaging.Data) {
+                                // Server may convert messages to Data format
+                                value = new String(((org.apache.qpid.proton.amqp.messaging.Data) body).getValue().getArray());
+                            }
+                            receivedMessage.set(value);
+                            log.info("Message received: {}", value);
 
-                                if (testMessage.equals(value.toString())) {
-                                    success.set(true);
-                                }
+                            if (testMessage.equals(value)) {
+                                success.set(true);
                             }
                             delivery.disposition(new org.apache.qpid.proton.amqp.messaging.Accepted(), true);
                             receiver.close();
@@ -458,7 +472,7 @@ public class Amqp10ProtocolComplianceTest {
 
         // Send multiple messages
         CountDownLatch sendDone = new CountDownLatch(1);
-        client.connect(TEST_HOST, TEST_PORT, res -> {
+        client.connect(createClientOptions(), TEST_HOST, TEST_PORT, res -> {
             if (res.succeeded()) {
                 ProtonConnection conn = res.result();
                 conn.openHandler(openRes -> {
@@ -495,12 +509,13 @@ public class Amqp10ProtocolComplianceTest {
         // Receive all messages
         java.util.concurrent.atomic.AtomicInteger receivedCount = new java.util.concurrent.atomic.AtomicInteger(0);
 
-        client.connect(TEST_HOST, TEST_PORT, res -> {
+        client.connect(createClientOptions(), TEST_HOST, TEST_PORT, res -> {
             if (res.succeeded()) {
                 ProtonConnection conn = res.result();
                 conn.openHandler(openRes -> {
                     if (openRes.succeeded()) {
                         ProtonReceiver receiver = conn.createReceiver(queueName);
+                        receiver.setPrefetch(0); // Disable auto prefetch to use manual credit
                         receiver.handler((delivery, msg) -> {
                             int count = receivedCount.incrementAndGet();
                             log.info("Received message {}", count);
@@ -554,7 +569,7 @@ public class Amqp10ProtocolComplianceTest {
 
         ProtonClient client = ProtonClient.create(vertx);
 
-        client.connect(TEST_HOST, TEST_PORT, res -> {
+        client.connect(createClientOptions(), TEST_HOST, TEST_PORT, res -> {
             if (res.succeeded()) {
                 ProtonConnection conn = res.result();
                 conn.openHandler(openRes -> {
@@ -657,7 +672,7 @@ public class Amqp10ProtocolComplianceTest {
 
         // Send message with properties
         CountDownLatch sendDone = new CountDownLatch(1);
-        client.connect(TEST_HOST, TEST_PORT, res -> {
+        client.connect(createClientOptions(), TEST_HOST, TEST_PORT, res -> {
             if (res.succeeded()) {
                 ProtonConnection conn = res.result();
                 conn.openHandler(openRes -> {
@@ -697,12 +712,14 @@ public class Amqp10ProtocolComplianceTest {
         assertTrue(sendDone.await(TIMEOUT_SECONDS, TimeUnit.SECONDS), "Send timeout");
 
         // Receive and verify properties
-        client.connect(TEST_HOST, TEST_PORT, res -> {
+        client.connect(createClientOptions(), TEST_HOST, TEST_PORT, res -> {
             if (res.succeeded()) {
                 ProtonConnection conn = res.result();
                 conn.openHandler(openRes -> {
                     if (openRes.succeeded()) {
                         ProtonReceiver receiver = conn.createReceiver(queueName);
+                        receiver.setPrefetch(0); // Disable auto prefetch to use manual credit
+                        receiver.setAutoAccept(false); // Disable auto accept to manually disposition
                         receiver.handler((delivery, msg) -> {
                             log.info("Received message with properties");
 

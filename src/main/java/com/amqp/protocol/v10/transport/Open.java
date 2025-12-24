@@ -4,6 +4,8 @@ import com.amqp.protocol.v10.types.AmqpType;
 import com.amqp.protocol.v10.types.DescribedType;
 import com.amqp.protocol.v10.types.Symbol;
 import com.amqp.protocol.v10.types.TypeDecoder;
+import com.amqp.protocol.v10.types.UInt;
+import com.amqp.protocol.v10.types.UShort;
 
 import java.util.*;
 
@@ -58,9 +60,12 @@ public class Open implements Performative {
         List<Object> fields = new ArrayList<>();
         fields.add(containerId);
         fields.add(hostname);
-        fields.add(maxFrameSize == DEFAULT_MAX_FRAME_SIZE ? null : maxFrameSize);
-        fields.add(channelMax == DEFAULT_CHANNEL_MAX ? null : channelMax);
-        fields.add(idleTimeout == DEFAULT_IDLE_TIMEOUT ? null : idleTimeout);
+        // max-frame-size is uint per AMQP 1.0 spec
+        fields.add(maxFrameSize == DEFAULT_MAX_FRAME_SIZE ? null : UInt.valueOf(maxFrameSize));
+        // channel-max is ushort per AMQP 1.0 spec
+        fields.add(channelMax == DEFAULT_CHANNEL_MAX ? null : UShort.valueOf(channelMax));
+        // idle-time-out is milliseconds (uint) per AMQP 1.0 spec
+        fields.add(idleTimeout == DEFAULT_IDLE_TIMEOUT ? null : UInt.valueOf(idleTimeout));
         fields.add(outgoingLocales);
         fields.add(incomingLocales);
         fields.add(offeredCapabilities);

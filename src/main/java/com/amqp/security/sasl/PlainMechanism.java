@@ -21,14 +21,31 @@ public class PlainMechanism implements SaslMechanism {
     public static final String NAME = "PLAIN";
 
     private final BiFunction<String, String, Boolean> authenticator;
+    private final boolean requireTls;
 
     /**
      * Create with a custom authenticator function.
+     * TLS is required by default for security.
      *
      * @param authenticator function that takes (username, password) and returns true if valid
      */
     public PlainMechanism(BiFunction<String, String, Boolean> authenticator) {
+        this(authenticator, true);
+    }
+
+    /**
+     * Create with a custom authenticator function and TLS requirement setting.
+     *
+     * @param authenticator function that takes (username, password) and returns true if valid
+     * @param requireTls whether to require TLS for this mechanism (should be true in production)
+     */
+    public PlainMechanism(BiFunction<String, String, Boolean> authenticator, boolean requireTls) {
         this.authenticator = authenticator;
+        this.requireTls = requireTls;
+        if (!requireTls) {
+            log.warn("PLAIN SASL mechanism configured WITHOUT TLS requirement - " +
+                     "passwords will be transmitted in clear text! This is insecure for production.");
+        }
     }
 
     @Override
@@ -38,8 +55,11 @@ public class PlainMechanism implements SaslMechanism {
 
     @Override
     public boolean isApplicable(SaslContext context) {
-        // PLAIN should only be used over TLS for security
-        // But we allow it for testing purposes
+        // PLAIN transmits passwords in clear text - TLS is required for security
+        if (requireTls && !context.isTlsEnabled()) {
+            log.debug("PLAIN mechanism not applicable: TLS required but not enabled");
+            return false;
+        }
         return true;
     }
 

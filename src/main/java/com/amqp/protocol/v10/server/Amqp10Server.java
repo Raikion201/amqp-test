@@ -3,6 +3,8 @@ package com.amqp.protocol.v10.server;
 import com.amqp.protocol.v10.frame.Amqp10FrameDecoder;
 import com.amqp.protocol.v10.frame.Amqp10FrameEncoder;
 import com.amqp.protocol.v10.frame.Amqp10ProtocolDecoder;
+import com.amqp.protocol.v10.security.Amqp10SecurityConfig;
+import com.amqp.protocol.v10.security.ConnectionLimiter;
 import com.amqp.security.sasl.PlainMechanism;
 import com.amqp.security.sasl.AnonymousMechanism;
 import com.amqp.security.sasl.SaslNegotiator;
@@ -48,15 +50,26 @@ public class Amqp10Server {
     private int idleTimeout = 60000;
     private boolean requireSasl = true;
 
+    // Security configuration
+    private Amqp10SecurityConfig securityConfig;
+    private ConnectionLimiter connectionLimiter;
+
     public Amqp10Server(AmqpBroker broker, int port) {
         this(broker, port, null);
     }
 
     public Amqp10Server(AmqpBroker broker, int port, SslContext sslContext) {
+        this(broker, port, sslContext, Amqp10SecurityConfig.defaults());
+    }
+
+    public Amqp10Server(AmqpBroker broker, int port, SslContext sslContext,
+                        Amqp10SecurityConfig securityConfig) {
         this.broker = broker;
         this.port = port;
         this.sslContext = sslContext;
+        this.securityConfig = securityConfig;
         this.containerId = "amqp-server-" + UUID.randomUUID().toString().substring(0, 8);
+        this.connectionLimiter = new ConnectionLimiter(securityConfig);
     }
 
     /**
@@ -66,12 +79,14 @@ public class Amqp10Server {
         SaslNegotiator negotiator = new SaslNegotiator();
 
         // Add PLAIN mechanism using broker's authentication
+        // TLS requirement is enforced based on security config
+        boolean requireTlsForPlain = securityConfig.isRequireTlsForPlainAuth();
         negotiator.addMechanism(new PlainMechanism((username, password) -> {
             return broker.authenticate(username, password);
-        }));
+        }, requireTlsForPlain));
 
-        // Add ANONYMOUS mechanism if guest user is enabled
-        if (broker.isGuestUserEnabled()) {
+        // Add ANONYMOUS mechanism if guest user is enabled and config allows it
+        if (broker.isGuestUserEnabled() && securityConfig.isAllowAnonymous()) {
             negotiator.addMechanism(new AnonymousMechanism());
         }
 
@@ -94,33 +109,47 @@ public class Amqp10Server {
                         protected void initChannel(SocketChannel ch) {
                             ChannelPipeline pipeline = ch.pipeline();
 
+                            // Connection limiter (first in pipeline for early rejection)
+                            pipeline.addLast("connectionLimiter", connectionLimiter);
+
                             // TLS if configured
                             if (sslContext != null) {
                                 pipeline.addLast("ssl", sslContext.newHandler(ch.alloc()));
+                            } else if (securityConfig.isRequireTlsForAllConnections()) {
+                                // Reject non-TLS connections if TLS is required
+                                log.warn("TLS required but not configured - rejecting connection from {}",
+                                        ch.remoteAddress());
+                                ch.close();
+                                return;
                             }
 
                             // Idle state handler for heartbeats
-                            if (idleTimeout > 0) {
+                            // Use security config's validated timeout
+                            long validatedTimeout = securityConfig.validateIdleTimeout(idleTimeout);
+                            if (validatedTimeout > 0) {
                                 pipeline.addLast("idle", new IdleStateHandler(
-                                        idleTimeout * 2, idleTimeout, 0, TimeUnit.MILLISECONDS));
+                                        validatedTimeout * 2, validatedTimeout, 0, TimeUnit.MILLISECONDS));
                             }
 
                             // Protocol header decoder (handles AMQP/SASL header negotiation)
                             pipeline.addLast("protocol", new Amqp10ProtocolDecoder(requireSasl));
 
-                            // Frame codec
-                            pipeline.addLast("frameDecoder", new Amqp10FrameDecoder(maxFrameSize));
+                            // Frame codec - use max frame size from security config
+                            int effectiveMaxFrameSize = (int) Math.min(maxFrameSize,
+                                    securityConfig.getMaxFrameSize());
+                            pipeline.addLast("frameDecoder", new Amqp10FrameDecoder(effectiveMaxFrameSize));
                             pipeline.addLast("frameEncoder", new Amqp10FrameEncoder());
 
                             // SASL handler (before connection handler)
-                            if (requireSasl) {
-                                SaslNegotiator negotiator = createSaslNegotiator();
-                                pipeline.addLast("sasl", new Sasl10Handler(negotiator, requireSasl));
-                            }
+                            // Always add SASL handler to support clients that want SASL,
+                            // but mark as required only if configured
+                            boolean saslRequired = requireSasl || securityConfig.isRequireAuthentication();
+                            SaslNegotiator negotiator = createSaslNegotiator();
+                            pipeline.addLast("sasl", new Sasl10Handler(negotiator, saslRequired));
 
-                            // Connection handler
+                            // Connection handler with security config
                             pipeline.addLast("handler", new Amqp10ConnectionHandler(
-                                    broker, containerId, maxFrameSize, requireSasl));
+                                    broker, containerId, effectiveMaxFrameSize, saslRequired));
                         }
                     });
 
@@ -190,9 +219,34 @@ public class Amqp10Server {
 
     public void setRequireSasl(boolean requireSasl) {
         this.requireSasl = requireSasl;
+        // When SASL is disabled, also update security config to be consistent
+        if (!requireSasl) {
+            securityConfig.setRequireAuthentication(false);
+            securityConfig.setAllowAnonymous(true);
+        }
     }
 
     public boolean isRunning() {
         return serverChannel != null && serverChannel.isActive();
+    }
+
+    public Amqp10SecurityConfig getSecurityConfig() {
+        return securityConfig;
+    }
+
+    public void setSecurityConfig(Amqp10SecurityConfig securityConfig) {
+        this.securityConfig = securityConfig;
+        this.connectionLimiter = new ConnectionLimiter(securityConfig);
+    }
+
+    public ConnectionLimiter getConnectionLimiter() {
+        return connectionLimiter;
+    }
+
+    /**
+     * Get current connection statistics.
+     */
+    public ConnectionLimiter.Stats getConnectionStats() {
+        return connectionLimiter.getStats();
     }
 }

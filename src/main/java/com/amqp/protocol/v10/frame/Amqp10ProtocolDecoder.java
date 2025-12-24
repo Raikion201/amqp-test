@@ -15,8 +15,11 @@ import java.util.List;
  * - AMQP protocol header: 'AMQP' 0x00 0x01 0x00 0x00 (AMQP 1.0.0)
  * - SASL protocol header: 'AMQP' 0x03 0x01 0x00 0x00 (SASL layer)
  *
- * After successful header negotiation, this decoder replaces itself with
- * the appropriate frame decoder.
+ * State machine:
+ * 1. INITIAL: Expect SASL or AMQP header
+ * 2. SASL_IN_PROGRESS: Pass through SASL frames until SASL completes
+ * 3. AWAITING_AMQP: Expect AMQP header after SASL
+ * 4. COMPLETE: Remove self from pipeline
  */
 public class Amqp10ProtocolDecoder extends ByteToMessageDecoder {
 
@@ -30,8 +33,15 @@ public class Amqp10ProtocolDecoder extends ByteToMessageDecoder {
     // SASL layer protocol header
     public static final byte[] SASL_HEADER = {'A', 'M', 'Q', 'P', 0x03, 0x01, 0x00, 0x00};
 
+    private enum State {
+        INITIAL,
+        SASL_IN_PROGRESS,
+        AWAITING_AMQP,
+        COMPLETE
+    }
+
     private final boolean requireSasl;
-    private boolean saslNegotiated = false;
+    private State state = State.INITIAL;
 
     public Amqp10ProtocolDecoder() {
         this(false);
@@ -43,24 +53,62 @@ public class Amqp10ProtocolDecoder extends ByteToMessageDecoder {
 
     @Override
     protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
+        logger.debug("decode() called: state={}, readable={}", state, in.readableBytes());
+
+        switch (state) {
+            case INITIAL:
+            case AWAITING_AMQP:
+                decodeHeader(ctx, in, out);
+                break;
+
+            case SASL_IN_PROGRESS:
+                // Pass through all data to the next handler (frame decoder)
+                if (in.isReadable()) {
+                    out.add(in.readRetainedSlice(in.readableBytes()));
+                }
+                break;
+
+            case COMPLETE:
+                // Should not happen - we should be removed from pipeline
+                if (in.isReadable()) {
+                    out.add(in.readRetainedSlice(in.readableBytes()));
+                }
+                break;
+        }
+    }
+
+    private void decodeHeader(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
         if (in.readableBytes() < PROTOCOL_HEADER_SIZE) {
             return;
         }
 
+        // Peek at the header first to validate
         byte[] header = new byte[PROTOCOL_HEADER_SIZE];
-        in.readBytes(header);
+        in.getBytes(in.readerIndex(), header);
 
+        // Check if it looks like a protocol header
+        if (header[0] != 'A' || header[1] != 'M' || header[2] != 'Q' || header[3] != 'P') {
+            // Not a protocol header - this shouldn't happen in INITIAL/AWAITING_AMQP state
+            throw new IllegalStateException("Expected AMQP protocol header, got invalid data");
+        }
+
+        // Now consume and validate
+        in.readBytes(header);
         ProtocolType protocolType = validateHeader(header);
 
         logger.info("Received AMQP 1.0 protocol header: {}", protocolType);
 
         switch (protocolType) {
             case SASL:
+                if (state == State.AWAITING_AMQP) {
+                    // Got SASL when expecting AMQP
+                    throw new IllegalStateException("Expected AMQP header after SASL, got SASL header");
+                }
                 handleSaslHeader(ctx, out);
                 break;
 
             case AMQP:
-                if (requireSasl && !saslNegotiated) {
+                if (state == State.INITIAL && requireSasl) {
                     // Client tried AMQP but we require SASL first
                     logger.warn("SASL required but client sent AMQP header");
                     sendSaslHeader(ctx);
@@ -75,7 +123,7 @@ public class Amqp10ProtocolDecoder extends ByteToMessageDecoder {
     }
 
     private ProtocolType validateHeader(byte[] header) {
-        // Check 'AMQP' signature
+        // Check 'AMQP' signature (already verified in decodeHeader, but double-check)
         if (header[0] != 'A' || header[1] != 'M' || header[2] != 'Q' || header[3] != 'P') {
             throw new IllegalStateException("Invalid AMQP protocol signature");
         }
@@ -105,19 +153,23 @@ public class Amqp10ProtocolDecoder extends ByteToMessageDecoder {
         // Send SASL header back
         sendSaslHeader(ctx);
 
+        // Enter SASL in progress state - frames will be passed through
+        state = State.SASL_IN_PROGRESS;
+        logger.debug("Entered SASL negotiation mode");
+
         // Fire event for SASL negotiation
         ctx.fireUserEventTriggered(new ProtocolHeaderEvent(ProtocolType.SASL));
-
-        // Note: We don't replace the decoder yet - SASL frames will be handled
-        // and then this decoder will receive another header after SASL completes
     }
 
     private void handleAmqpHeader(ChannelHandlerContext ctx, List<Object> out) {
         // Send AMQP header back
         sendAmqpHeader(ctx);
 
-        // Replace this decoder with the frame decoder
-        ctx.pipeline().replace(this, "amqp10FrameDecoder", new Amqp10FrameDecoder());
+        // Mark complete and remove from pipeline
+        state = State.COMPLETE;
+
+        // Remove this decoder from the pipeline - frame decoder is already configured
+        ctx.pipeline().remove(this);
 
         // Fire event for connection start
         ctx.fireUserEventTriggered(new ProtocolHeaderEvent(ProtocolType.AMQP));
@@ -134,7 +186,7 @@ public class Amqp10ProtocolDecoder extends ByteToMessageDecoder {
         ByteBuf header = ctx.alloc().buffer(PROTOCOL_HEADER_SIZE);
         header.writeBytes(SASL_HEADER);
         ctx.writeAndFlush(header);
-        logger.debug("Sent SASL protocol header");
+        logger.info("Sent SASL protocol header (8 bytes)");
     }
 
     /**
@@ -142,7 +194,15 @@ public class Amqp10ProtocolDecoder extends ByteToMessageDecoder {
      * The next header received should be the AMQP header.
      */
     public void saslComplete() {
-        this.saslNegotiated = true;
+        state = State.AWAITING_AMQP;
+        logger.info("SASL complete, now awaiting AMQP header. State={}", state);
+    }
+
+    /**
+     * Get current state for debugging.
+     */
+    public State getState() {
+        return state;
     }
 
     /**

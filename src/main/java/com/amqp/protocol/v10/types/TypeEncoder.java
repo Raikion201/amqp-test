@@ -19,6 +19,12 @@ public class TypeEncoder {
             encodeNull(buffer);
         } else if (value instanceof Boolean) {
             encodeBoolean((Boolean) value, buffer);
+        } else if (value instanceof UByte) {
+            encodeUbyte(((UByte) value).intValue(), buffer);
+        } else if (value instanceof UShort) {
+            encodeUshort(((UShort) value).intValue(), buffer);
+        } else if (value instanceof UInt) {
+            encodeUint(((UInt) value).longValue(), buffer);
         } else if (value instanceof Byte) {
             encodeByte((Byte) value, buffer);
         } else if (value instanceof Short) {
@@ -248,7 +254,19 @@ public class TypeEncoder {
     }
 
     public static void encodeArray(Object array, ByteBuf buffer) {
-        // Handle primitive arrays and Object arrays
+        // byte[] is handled as binary, not array
+        if (array instanceof byte[]) {
+            encodeBinary((byte[]) array, buffer);
+            return;
+        }
+
+        // Handle Symbol[] specifically for SASL mechanisms
+        if (array instanceof Symbol[]) {
+            encodeSymbolArray((Symbol[]) array, buffer);
+            return;
+        }
+
+        // Handle other Object arrays as lists for compatibility
         List<Object> list = new ArrayList<>();
         if (array instanceof Object[]) {
             list.addAll(Arrays.asList((Object[]) array));
@@ -256,18 +274,78 @@ public class TypeEncoder {
             for (int v : (int[]) array) list.add(v);
         } else if (array instanceof long[]) {
             for (long v : (long[]) array) list.add(v);
-        } else if (array instanceof byte[]) {
-            // byte[] is handled as binary, not array
-            encodeBinary((byte[]) array, buffer);
+        }
+        // For other types, encode as lists
+        encodeList(list, buffer);
+    }
+
+    /**
+     * Encode a Symbol array using AMQP 1.0 array format.
+     * This is required for SASL mechanisms which expects symbol[].
+     */
+    public static void encodeSymbolArray(Symbol[] symbols, ByteBuf buffer) {
+        if (symbols.length == 0) {
+            // Empty array - use list0 format for compatibility
+            buffer.writeByte(AmqpType.FormatCode.LIST_0);
             return;
         }
-        // For simplicity, encode arrays as lists
-        encodeList(list, buffer);
+
+        // Encode symbols to temporary buffer to get size
+        ByteBuf tempBuffer = buffer.alloc().buffer();
+        try {
+            // Determine if we need sym8 or sym32 format
+            boolean useSmallFormat = true;
+            for (Symbol s : symbols) {
+                byte[] bytes = s.toString().getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+                if (bytes.length > 255) {
+                    useSmallFormat = false;
+                    break;
+                }
+            }
+
+            // Write element constructor and data
+            byte elementConstructor = useSmallFormat ?
+                    AmqpType.FormatCode.SYM8 : AmqpType.FormatCode.SYM32;
+
+            for (Symbol s : symbols) {
+                byte[] bytes = s.toString().getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+                if (useSmallFormat) {
+                    tempBuffer.writeByte(bytes.length);
+                } else {
+                    tempBuffer.writeInt(bytes.length);
+                }
+                tempBuffer.writeBytes(bytes);
+            }
+
+            int count = symbols.length;
+            // Size includes: 1 byte for element constructor + element data
+            int size = 1 + tempBuffer.readableBytes();
+
+            if (count <= 255 && size <= 255) {
+                buffer.writeByte(AmqpType.FormatCode.ARRAY8);
+                buffer.writeByte(size);
+                buffer.writeByte(count);
+            } else {
+                buffer.writeByte(AmqpType.FormatCode.ARRAY32);
+                buffer.writeInt(size);
+                buffer.writeInt(count);
+            }
+            buffer.writeByte(elementConstructor);
+            buffer.writeBytes(tempBuffer);
+        } finally {
+            tempBuffer.release();
+        }
     }
 
     public static void encodeDescribed(DescribedType value, ByteBuf buffer) {
         buffer.writeByte(AmqpType.FormatCode.DESCRIBED);
-        encode(value.getDescriptor(), buffer);
+        // Descriptors are always ulong in AMQP 1.0
+        Object descriptor = value.getDescriptor();
+        if (descriptor instanceof Number) {
+            encodeUlong(((Number) descriptor).longValue(), buffer);
+        } else {
+            encode(descriptor, buffer);
+        }
         encode(value.getDescribed(), buffer);
     }
 

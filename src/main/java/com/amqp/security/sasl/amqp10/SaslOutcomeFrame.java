@@ -3,6 +3,7 @@ package com.amqp.security.sasl.amqp10;
 import com.amqp.protocol.v10.types.AmqpType;
 import com.amqp.protocol.v10.types.DescribedType;
 import com.amqp.protocol.v10.types.TypeDecoder;
+import com.amqp.protocol.v10.types.UByte;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -42,7 +43,8 @@ public class SaslOutcomeFrame implements SaslPerformative {
     @Override
     public DescribedType toDescribed() {
         List<Object> fields = new ArrayList<>();
-        fields.add(code);
+        // code must be encoded as ubyte (0x50) per AMQP 1.0 spec
+        fields.add(UByte.valueOf(code));
         fields.add(additionalData);
 
         while (!fields.isEmpty() && fields.get(fields.size() - 1) == null) {

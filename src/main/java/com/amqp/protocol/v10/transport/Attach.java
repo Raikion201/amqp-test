@@ -5,6 +5,8 @@ import com.amqp.protocol.v10.types.AmqpType;
 import com.amqp.protocol.v10.types.DescribedType;
 import com.amqp.protocol.v10.types.Symbol;
 import com.amqp.protocol.v10.types.TypeDecoder;
+import com.amqp.protocol.v10.types.UByte;
+import com.amqp.protocol.v10.types.UInt;
 
 import java.util.*;
 
@@ -72,10 +74,13 @@ public class Attach implements Performative {
     public List<Object> getFields() {
         List<Object> fields = new ArrayList<>();
         fields.add(name);
-        fields.add(handle);
+        // handle is uint per AMQP 1.0 spec
+        fields.add(UInt.valueOf(handle));
         fields.add(role);
-        fields.add(sndSettleMode);
-        fields.add(rcvSettleMode);
+        // snd-settle-mode is ubyte per AMQP 1.0 spec
+        fields.add(sndSettleMode == null ? null : UByte.valueOf(sndSettleMode));
+        // rcv-settle-mode is ubyte per AMQP 1.0 spec
+        fields.add(rcvSettleMode == null ? null : UByte.valueOf(rcvSettleMode));
         fields.add(source != null ? source.toDescribed() : null);
         // Use coordinator if set, otherwise target
         if (coordinator != null) {
@@ -85,7 +90,9 @@ public class Attach implements Performative {
         }
         fields.add(unsettled);
         fields.add(incompleteUnsettled);
-        fields.add(initialDeliveryCount);
+        // initial-delivery-count is sequence-no (uint) per AMQP 1.0 spec
+        fields.add(initialDeliveryCount == null ? null : UInt.valueOf(initialDeliveryCount));
+        // max-message-size is ulong - keep as Long for now
         fields.add(maxMessageSize);
         fields.add(offeredCapabilities);
         fields.add(desiredCapabilities);
