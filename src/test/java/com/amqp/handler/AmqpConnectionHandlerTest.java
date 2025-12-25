@@ -4,6 +4,8 @@ import com.amqp.amqp.AmqpFrame;
 import com.amqp.amqp.AmqpCodec;
 import com.amqp.server.AmqpBroker;
 import com.amqp.connection.AmqpConnection;
+import com.amqp.persistence.DatabaseManager;
+import com.amqp.persistence.PersistenceManager;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
@@ -12,30 +14,40 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.BeforeEach;
-import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.junit.jupiter.api.AfterEach;
 
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 
 import static org.assertj.core.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.*;
 
 @DisplayName("AMQP Connection Handler Tests")
 class AmqpConnectionHandlerTest {
 
-    @Mock
-    private AmqpBroker mockBroker;
-
+    private AmqpBroker broker;
     private EmbeddedChannel channel;
     private AmqpConnectionHandler handler;
 
     @BeforeEach
     void setUp() {
-        MockitoAnnotations.openMocks(this);
-        handler = new AmqpConnectionHandler(mockBroker);
+        // Create a real broker with in-memory H2 database
+        DatabaseManager dbManager = new DatabaseManager(
+            "jdbc:h2:mem:test_" + System.currentTimeMillis() + ";DB_CLOSE_DELAY=-1;MODE=PostgreSQL",
+            "sa", "");
+        PersistenceManager persistenceManager = new PersistenceManager(dbManager);
+        broker = new AmqpBroker(persistenceManager, true);
+        handler = new AmqpConnectionHandler(broker);
         channel = new EmbeddedChannel(handler);
+    }
+
+    @AfterEach
+    void tearDown() {
+        if (channel != null && channel.isOpen()) {
+            channel.close();
+        }
+        if (broker != null) {
+            broker.stop();
+        }
     }
 
     @Nested
@@ -45,7 +57,7 @@ class AmqpConnectionHandlerTest {
         @Test
         @DisplayName("Should create handler with broker")
         void testHandlerCreation() {
-            AmqpConnectionHandler handler = new AmqpConnectionHandler(mockBroker);
+            AmqpConnectionHandler handler = new AmqpConnectionHandler(broker);
             assertThat(handler).isNotNull();
         }
 
@@ -56,15 +68,26 @@ class AmqpConnectionHandlerTest {
         }
     }
 
+    /**
+     * Trigger the protocol header received event to simulate receiving the AMQP protocol header.
+     * In the real server, this is done by the ProtocolHeaderDecoder.
+     */
+    private void sendAmqpProtocolHeader() {
+        // Fire the ProtocolHeaderReceivedEvent to trigger Connection.Start
+        channel.pipeline().fireUserEventTriggered(com.amqp.amqp.ProtocolHeaderReceivedEvent.INSTANCE);
+    }
+
     @Nested
     @DisplayName("Channel Activation Tests")
     class ChannelActivationTests {
 
         @Test
-        @DisplayName("Should send Connection.Start on channel active")
+        @DisplayName("Should send Connection.Start after receiving protocol header")
         void testChannelActiveSendsConnectionStart() {
-            // Channel is already active from setUp
-            // Check that a frame was sent
+            // Send AMQP protocol header first
+            sendAmqpProtocolHeader();
+
+            // Check that Connection.Start frame was sent
             AmqpFrame sentFrame = channel.readOutbound();
 
             assertThat(sentFrame).isNotNull();
@@ -85,6 +108,9 @@ class AmqpConnectionHandlerTest {
         @Test
         @DisplayName("Should create connection on channel active")
         void testConnectionCreatedOnActive() {
+            // Send AMQP protocol header first
+            sendAmqpProtocolHeader();
+
             // Connection should be created when channel becomes active
             // This is verified by the fact that Connection.Start is sent
             AmqpFrame sentFrame = channel.readOutbound();
@@ -95,6 +121,9 @@ class AmqpConnectionHandlerTest {
         @Test
         @DisplayName("Should send Connection.Start with correct protocol version")
         void testConnectionStartProtocolVersion() {
+            // Send AMQP protocol header first
+            sendAmqpProtocolHeader();
+
             AmqpFrame sentFrame = channel.readOutbound();
             assertThat(sentFrame).isNotNull();
 
@@ -114,6 +143,9 @@ class AmqpConnectionHandlerTest {
         @Test
         @DisplayName("Should send Connection.Start with mechanism")
         void testConnectionStartMechanism() {
+            // Send AMQP protocol header first
+            sendAmqpProtocolHeader();
+
             AmqpFrame sentFrame = channel.readOutbound();
             assertThat(sentFrame).isNotNull();
 
@@ -202,8 +234,8 @@ class AmqpConnectionHandlerTest {
                 channel.writeInbound(frame);
             }
 
-            // If we get here without exceptions, test passes
-            assertThat(true).isTrue();
+            // Verify channel is still active after handling multiple frames
+            assertThat(channel.isActive()).isTrue();
         }
     }
 
@@ -299,9 +331,9 @@ class AmqpConnectionHandlerTest {
         @DisplayName("Should handle multiple connections")
         void testMultipleConnections() {
             // Create multiple handler instances
-            AmqpConnectionHandler handler1 = new AmqpConnectionHandler(mockBroker);
-            AmqpConnectionHandler handler2 = new AmqpConnectionHandler(mockBroker);
-            AmqpConnectionHandler handler3 = new AmqpConnectionHandler(mockBroker);
+            AmqpConnectionHandler handler1 = new AmqpConnectionHandler(broker);
+            AmqpConnectionHandler handler2 = new AmqpConnectionHandler(broker);
+            AmqpConnectionHandler handler3 = new AmqpConnectionHandler(broker);
 
             EmbeddedChannel channel1 = new EmbeddedChannel(handler1);
             EmbeddedChannel channel2 = new EmbeddedChannel(handler2);
@@ -322,8 +354,11 @@ class AmqpConnectionHandlerTest {
     class ProtocolComplianceTests {
 
         @Test
-        @DisplayName("Should send Connection.Start as first frame")
+        @DisplayName("Should send Connection.Start after protocol header")
         void testConnectionStartFirst() {
+            // Send AMQP protocol header first
+            sendAmqpProtocolHeader();
+
             AmqpFrame firstFrame = channel.readOutbound();
 
             assertThat(firstFrame).isNotNull();
@@ -341,7 +376,11 @@ class AmqpConnectionHandlerTest {
         @Test
         @DisplayName("Should send Connection.Start on channel 0")
         void testConnectionStartOnChannelZero() {
+            // Send AMQP protocol header first
+            sendAmqpProtocolHeader();
+
             AmqpFrame frame = channel.readOutbound();
+            assertThat(frame).isNotNull();
 
             assertThat(frame.getChannel()).isEqualTo((short) 0);
 
@@ -351,7 +390,11 @@ class AmqpConnectionHandlerTest {
         @Test
         @DisplayName("Should include server properties in Connection.Start")
         void testConnectionStartServerProperties() {
+            // Send AMQP protocol header first
+            sendAmqpProtocolHeader();
+
             AmqpFrame frame = channel.readOutbound();
+            assertThat(frame).isNotNull();
 
             ByteBuf payload = frame.getPayload();
             payload.readShort(); // class ID
@@ -368,7 +411,11 @@ class AmqpConnectionHandlerTest {
         @Test
         @DisplayName("Should include locale in Connection.Start")
         void testConnectionStartLocale() {
+            // Send AMQP protocol header first
+            sendAmqpProtocolHeader();
+
             AmqpFrame frame = channel.readOutbound();
+            assertThat(frame).isNotNull();
 
             ByteBuf payload = frame.getPayload();
             payload.readShort(); // class ID
@@ -391,15 +438,17 @@ class AmqpConnectionHandlerTest {
         @Test
         @DisplayName("Should handle rapid connection creation and destruction")
         void testRapidConnectionCycles() {
+            int successfulCycles = 0;
             for (int i = 0; i < 100; i++) {
-                AmqpConnectionHandler tempHandler = new AmqpConnectionHandler(mockBroker);
+                AmqpConnectionHandler tempHandler = new AmqpConnectionHandler(broker);
                 EmbeddedChannel tempChannel = new EmbeddedChannel(tempHandler);
                 tempChannel.readOutbound(); // Clear Connection.Start
                 tempChannel.close();
+                successfulCycles++;
             }
 
-            // If we get here without issues, test passes
-            assertThat(true).isTrue();
+            // Verify all 100 cycles completed successfully
+            assertThat(successfulCycles).isEqualTo(100);
         }
 
         @Test
@@ -407,6 +456,7 @@ class AmqpConnectionHandlerTest {
         void testManyFrames() {
             channel.readOutbound(); // Clear Connection.Start
 
+            int framesProcessed = 0;
             for (int i = 0; i < 1000; i++) {
                 ByteBuf payload = Unpooled.buffer();
                 payload.writeShort(8); // Heartbeat would be simplest
@@ -414,9 +464,12 @@ class AmqpConnectionHandlerTest {
 
                 AmqpFrame frame = new AmqpFrame(AmqpFrame.FrameType.HEARTBEAT.getValue(), (short) 0, payload);
                 channel.writeInbound(frame);
+                framesProcessed++;
             }
 
-            assertThat(true).isTrue();
+            // Verify all 1000 frames were processed and channel is still active
+            assertThat(framesProcessed).isEqualTo(1000);
+            assertThat(channel.isActive()).isTrue();
         }
     }
 }

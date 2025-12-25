@@ -1,11 +1,12 @@
 package com.amqp.server;
 
+import com.amqp.persistence.DatabaseManager;
+import com.amqp.persistence.PersistenceManager;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.BeforeEach;
-import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.junit.jupiter.api.AfterEach;
 
 import java.net.Socket;
 import java.util.concurrent.CountDownLatch;
@@ -17,12 +18,23 @@ import static org.assertj.core.api.Assertions.*;
 @DisplayName("AMQP Server Tests")
 class AmqpServerTest {
 
-    @Mock
-    private AmqpBroker mockBroker;
+    private AmqpBroker broker;
 
     @BeforeEach
     void setUp() {
-        MockitoAnnotations.openMocks(this);
+        // Create a real broker with in-memory H2 database
+        DatabaseManager dbManager = new DatabaseManager(
+            "jdbc:h2:mem:test_" + System.currentTimeMillis() + ";DB_CLOSE_DELAY=-1;MODE=PostgreSQL",
+            "sa", "");
+        PersistenceManager persistenceManager = new PersistenceManager(dbManager);
+        broker = new AmqpBroker(persistenceManager, true);
+    }
+
+    @AfterEach
+    void tearDown() {
+        if (broker != null) {
+            broker.stop();
+        }
     }
 
     @Nested
@@ -32,21 +44,21 @@ class AmqpServerTest {
         @Test
         @DisplayName("Should create server with valid port and broker")
         void testServerCreation() {
-            AmqpServer server = new AmqpServer(5672, mockBroker);
+            AmqpServer server = new AmqpServer(5672, broker);
             assertThat(server).isNotNull();
         }
 
         @Test
         @DisplayName("Should create server with custom port")
         void testServerWithCustomPort() {
-            AmqpServer server = new AmqpServer(15672, mockBroker);
+            AmqpServer server = new AmqpServer(15672, broker);
             assertThat(server).isNotNull();
         }
 
         @Test
         @DisplayName("Should create server with high port number")
         void testServerWithHighPort() {
-            AmqpServer server = new AmqpServer(65000, mockBroker);
+            AmqpServer server = new AmqpServer(65000, broker);
             assertThat(server).isNotNull();
         }
     }
@@ -58,7 +70,7 @@ class AmqpServerTest {
         @Test
         @DisplayName("Should start server on specified port")
         void testServerStart() throws Exception {
-            AmqpServer server = new AmqpServer(15672, mockBroker);
+            AmqpServer server = new AmqpServer(15672, broker);
 
             Thread serverThread = new Thread(() -> {
                 try {
@@ -90,7 +102,7 @@ class AmqpServerTest {
         @Test
         @DisplayName("Should stop server gracefully")
         void testServerStop() throws Exception {
-            AmqpServer server = new AmqpServer(15673, mockBroker);
+            AmqpServer server = new AmqpServer(15673, broker);
 
             AtomicBoolean serverStarted = new AtomicBoolean(false);
             CountDownLatch startLatch = new CountDownLatch(1);
@@ -122,7 +134,7 @@ class AmqpServerTest {
         @Test
         @DisplayName("Should handle multiple start-stop cycles")
         void testMultipleStartStopCycles() throws Exception {
-            AmqpServer server = new AmqpServer(15674, mockBroker);
+            AmqpServer server = new AmqpServer(15674, broker);
 
             for (int i = 0; i < 2; i++) {
                 Thread serverThread = new Thread(() -> {
@@ -137,10 +149,10 @@ class AmqpServerTest {
                 Thread.sleep(1500);
                 server.stop();
                 serverThread.join(5000);
-            }
 
-            // If we get here without exceptions, test passes
-            assertThat(true).isTrue();
+                // Verify server thread is stopped
+                assertThat(serverThread.isAlive()).isFalse();
+            }
         }
     }
 
@@ -151,7 +163,7 @@ class AmqpServerTest {
         @Test
         @DisplayName("Should accept client connections")
         void testAcceptConnection() throws Exception {
-            AmqpServer server = new AmqpServer(15675, mockBroker);
+            AmqpServer server = new AmqpServer(15675, broker);
 
             Thread serverThread = new Thread(() -> {
                 try {
@@ -181,7 +193,7 @@ class AmqpServerTest {
         @Test
         @DisplayName("Should accept multiple concurrent connections")
         void testMultipleConnections() throws Exception {
-            AmqpServer server = new AmqpServer(15676, mockBroker);
+            AmqpServer server = new AmqpServer(15676, broker);
 
             Thread serverThread = new Thread(() -> {
                 try {
@@ -216,7 +228,7 @@ class AmqpServerTest {
         @Test
         @DisplayName("Should handle connection on localhost")
         void testLocalhostConnection() throws Exception {
-            AmqpServer server = new AmqpServer(15677, mockBroker);
+            AmqpServer server = new AmqpServer(15677, broker);
 
             Thread serverThread = new Thread(() -> {
                 try {
@@ -251,7 +263,7 @@ class AmqpServerTest {
         @Test
         @DisplayName("Should handle stop before start")
         void testStopBeforeStart() {
-            AmqpServer server = new AmqpServer(15678, mockBroker);
+            AmqpServer server = new AmqpServer(15678, broker);
 
             // Should not throw exception
             assertThatCode(() -> server.stop()).doesNotThrowAnyException();
@@ -260,7 +272,7 @@ class AmqpServerTest {
         @Test
         @DisplayName("Should handle multiple stop calls")
         void testMultipleStopCalls() throws Exception {
-            AmqpServer server = new AmqpServer(15679, mockBroker);
+            AmqpServer server = new AmqpServer(15679, broker);
 
             Thread serverThread = new Thread(() -> {
                 try {
@@ -284,8 +296,8 @@ class AmqpServerTest {
         @Test
         @DisplayName("Should refuse connections on already bound port")
         void testPortAlreadyInUse() throws Exception {
-            AmqpServer server1 = new AmqpServer(15680, mockBroker);
-            AmqpServer server2 = new AmqpServer(15680, mockBroker);
+            AmqpServer server1 = new AmqpServer(15680, broker);
+            AmqpServer server2 = new AmqpServer(15680, broker);
 
             Thread serverThread1 = new Thread(() -> {
                 try {
@@ -330,14 +342,14 @@ class AmqpServerTest {
         @Test
         @DisplayName("Should configure server with broker")
         void testServerWithBroker() {
-            AmqpServer server = new AmqpServer(5672, mockBroker);
+            AmqpServer server = new AmqpServer(5672, broker);
             assertThat(server).isNotNull();
         }
 
         @Test
         @DisplayName("Should accept connections after configuration")
         void testConnectionAfterConfiguration() throws Exception {
-            AmqpServer server = new AmqpServer(15681, mockBroker);
+            AmqpServer server = new AmqpServer(15681, broker);
 
             Thread serverThread = new Thread(() -> {
                 try {

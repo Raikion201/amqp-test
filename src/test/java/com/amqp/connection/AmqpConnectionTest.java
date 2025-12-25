@@ -2,35 +2,46 @@ package com.amqp.connection;
 
 import com.amqp.amqp.AmqpFrame;
 import com.amqp.server.AmqpBroker;
+import com.amqp.persistence.DatabaseManager;
+import com.amqp.persistence.PersistenceManager;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
+import io.netty.channel.embedded.EmbeddedChannel;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
 
 import static org.assertj.core.api.Assertions.*;
-import static org.mockito.Mockito.*;
 
-@ExtendWith(MockitoExtension.class)
 @DisplayName("AMQP Connection Tests")
 class AmqpConnectionTest {
 
-    @Mock
-    private Channel nettyChannel;
-
-    @Mock
+    private EmbeddedChannel nettyChannel;
     private AmqpBroker broker;
-
     private AmqpConnection connection;
 
     @BeforeEach
     void setUp() {
-        lenient().when(nettyChannel.isActive()).thenReturn(true);
+        nettyChannel = new EmbeddedChannel();
+        // Create a real broker with in-memory H2 database
+        DatabaseManager dbManager = new DatabaseManager(
+            "jdbc:h2:mem:test_" + System.currentTimeMillis() + ";DB_CLOSE_DELAY=-1;MODE=PostgreSQL",
+            "sa", "");
+        PersistenceManager persistenceManager = new PersistenceManager(dbManager);
+        broker = new AmqpBroker(persistenceManager, true);
         connection = new AmqpConnection(nettyChannel, broker);
+    }
+
+    @AfterEach
+    void tearDown() {
+        if (nettyChannel != null && nettyChannel.isOpen()) {
+            nettyChannel.close();
+        }
+        if (broker != null) {
+            broker.stop();
+        }
     }
 
     @Test
@@ -84,20 +95,24 @@ class AmqpConnectionTest {
 
         connection.sendFrame(frame);
 
-        verify(nettyChannel).writeAndFlush(frame);
+        // Verify frame was written to the channel
+        AmqpFrame sentFrame = nettyChannel.readOutbound();
+        assertThat(sentFrame).isEqualTo(frame);
     }
 
     @Test
     @DisplayName("Should not send frame when channel is inactive")
     void testSendFrameInactiveChannel() {
-        when(nettyChannel.isActive()).thenReturn(false);
-        
+        // Close the channel to make it inactive
+        nettyChannel.close();
+
         ByteBuf payload = Unpooled.buffer();
         AmqpFrame frame = new AmqpFrame((byte) 1, (short) 0, payload);
 
         connection.sendFrame(frame);
 
-        verify(nettyChannel, never()).writeAndFlush(any());
+        // No frame should be written
+        assertThat((Object) nettyChannel.readOutbound()).isNull();
     }
 
     @Test
@@ -108,7 +123,10 @@ class AmqpConnectionTest {
 
         connection.sendMethod((short) 1, (short) 10, (short) 20, payload);
 
-        verify(nettyChannel).writeAndFlush(any(AmqpFrame.class));
+        // Verify frame was written
+        AmqpFrame sentFrame = nettyChannel.readOutbound();
+        assertThat(sentFrame).isNotNull();
+        assertThat(sentFrame.getType()).isEqualTo(AmqpFrame.FrameType.METHOD.getValue());
     }
 
     @Test
@@ -116,7 +134,9 @@ class AmqpConnectionTest {
     void testSendMethodNullPayload() {
         connection.sendMethod((short) 1, (short) 10, (short) 20, null);
 
-        verify(nettyChannel).writeAndFlush(any(AmqpFrame.class));
+        // Verify frame was written
+        AmqpFrame sentFrame = nettyChannel.readOutbound();
+        assertThat(sentFrame).isNotNull();
     }
 
     @Test

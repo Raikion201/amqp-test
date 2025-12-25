@@ -30,18 +30,20 @@ public class AmqpChannel {
     private final AmqpBroker broker;
     private final AtomicBoolean open;
     private final ConcurrentMap<String, String> consumers;
-    private int prefetchCount = 0;
-    private boolean inTransaction = false;
+    private volatile int prefetchCount = 0;
+    private volatile boolean inTransaction = false;
 
-    // Transaction buffering
+    // Transaction buffering - synchronized on transactionLock
+    private final Object transactionLock = new Object();
     private final List<TransactionAction> transactionBuffer = new ArrayList<>();
 
     // Acknowledgement tracking
     private final AtomicLong deliveryTagGenerator = new AtomicLong(0);
     private final ConcurrentMap<Long, UnackedMessage> unackedMessages = new ConcurrentHashMap<>();
 
-    // Multi-frame message assembly state
-    private volatile PublishContext currentPublishContext;
+    // Multi-frame message assembly state - synchronized on publishLock
+    private final Object publishLock = new Object();
+    private PublishContext currentPublishContext;
 
     /**
      * Represents an unacknowledged message that has been delivered to a consumer.
@@ -736,11 +738,13 @@ public class AmqpChannel {
 
         logger.debug("Basic Publish: exchange={}, routingKey={}", exchangeName, routingKey);
 
-        // Clear any existing publish context and start new one
-        if (currentPublishContext != null) {
-            currentPublishContext.releaseBuffer();
+        // Clear any existing publish context and start new one - synchronized to prevent race conditions
+        synchronized (publishLock) {
+            if (currentPublishContext != null) {
+                currentPublishContext.releaseBuffer();
+            }
+            currentPublishContext = new PublishContext(exchangeName, routingKey, mandatory, immediate);
         }
-        currentPublishContext = new PublishContext(exchangeName, routingKey, mandatory, immediate);
     }
     
     private void handleBasicConsume(ByteBuf payload) {
@@ -936,12 +940,14 @@ public class AmqpChannel {
         logger.debug("Basic Ack: deliveryTag={}, multiple={}", deliveryTag, multiple);
 
         // Buffer if in transaction, otherwise execute immediately
-        if (inTransaction) {
-            transactionBuffer.add(new AckAction(deliveryTag, multiple));
-            logger.debug("Buffered ack in transaction: deliveryTag={}, multiple={}", deliveryTag, multiple);
-        } else {
-            acknowledgeMessage(deliveryTag, multiple);
+        synchronized (transactionLock) {
+            if (inTransaction) {
+                transactionBuffer.add(new AckAction(deliveryTag, multiple));
+                logger.debug("Buffered ack in transaction: deliveryTag={}, multiple={}", deliveryTag, multiple);
+                return;
+            }
         }
+        acknowledgeMessage(deliveryTag, multiple);
     }
 
     /**
@@ -987,12 +993,14 @@ public class AmqpChannel {
         logger.debug("Basic Reject: deliveryTag={}, requeue={}", deliveryTag, requeue);
 
         // Buffer if in transaction, otherwise execute immediately
-        if (inTransaction) {
-            transactionBuffer.add(new RejectAction(deliveryTag, requeue));
-            logger.debug("Buffered reject in transaction: deliveryTag={}, requeue={}", deliveryTag, requeue);
-        } else {
-            rejectMessage(deliveryTag, requeue);
+        synchronized (transactionLock) {
+            if (inTransaction) {
+                transactionBuffer.add(new RejectAction(deliveryTag, requeue));
+                logger.debug("Buffered reject in transaction: deliveryTag={}, requeue={}", deliveryTag, requeue);
+                return;
+            }
         }
+        rejectMessage(deliveryTag, requeue);
     }
 
     private void rejectMessage(long deliveryTag, boolean requeue) {
@@ -1062,21 +1070,22 @@ public class AmqpChannel {
     }
     
     private void handleHeaderFrame(AmqpFrame frame) {
-        if (currentPublishContext == null) {
-            logger.warn("Received header frame without publish context on channel: {}", channelNumber);
-            return;
-        }
+        synchronized (publishLock) {
+            if (currentPublishContext == null) {
+                logger.warn("Received header frame without publish context on channel: {}", channelNumber);
+                return;
+            }
 
-        ByteBuf payload = frame.getPayload();
-        short classId = payload.readShort();
-        payload.readShort(); // weight (unused)
-        long bodySize = payload.readLong();
+            ByteBuf payload = frame.getPayload();
+            short classId = payload.readShort();
+            payload.readShort(); // weight (unused)
+            long bodySize = payload.readLong();
 
-        currentPublishContext.expectedBodySize = bodySize;
+            currentPublishContext.expectedBodySize = bodySize;
 
-        // Parse content properties
-        short propertyFlags = payload.readShort();
-        Message message = currentPublishContext.message;
+            // Parse content properties
+            short propertyFlags = payload.readShort();
+            Message message = currentPublishContext.message;
 
         // Decode properties based on flags (bit 15 is highest)
         if ((propertyFlags & (1 << 15)) != 0) {
@@ -1120,48 +1129,52 @@ public class AmqpChannel {
             message.setAppId(AmqpCodec.decodeShortString(payload));
         }
 
-        // Initialize body buffer if needed
-        if (bodySize > 0) {
-            currentPublishContext.bodyBuffer = Unpooled.buffer((int) bodySize);
-        } else {
-            // Zero-body message - publish immediately
-            logger.debug("Received zero-body message, publishing immediately");
-            completePublish();
-            return;
-        }
+            // Initialize body buffer if needed
+            if (bodySize > 0) {
+                currentPublishContext.bodyBuffer = Unpooled.buffer((int) bodySize);
+            } else {
+                // Zero-body message - publish immediately
+                logger.debug("Received zero-body message, publishing immediately");
+                completePublishLocked();
+                return;
+            }
 
-        logger.debug("Received content header: bodySize={}, contentType={}",
-                    bodySize, message.getContentType());
+            logger.debug("Received content header: bodySize={}, contentType={}",
+                        bodySize, message.getContentType());
+        } // end synchronized
     }
 
     private void handleBodyFrame(AmqpFrame frame) {
-        if (currentPublishContext == null) {
-            logger.warn("Received body frame without publish context on channel: {}", channelNumber);
-            return;
-        }
+        synchronized (publishLock) {
+            if (currentPublishContext == null) {
+                logger.warn("Received body frame without publish context on channel: {}", channelNumber);
+                return;
+            }
 
-        ByteBuf payload = frame.getPayload();
+            ByteBuf payload = frame.getPayload();
 
-        // Append body data
-        if (currentPublishContext.bodyBuffer != null) {
-            currentPublishContext.bodyBuffer.writeBytes(payload);
-        }
+            // Append body data
+            if (currentPublishContext.bodyBuffer != null) {
+                currentPublishContext.bodyBuffer.writeBytes(payload);
+            }
 
-        // Check if we've received the complete message
-        long receivedSize = currentPublishContext.bodyBuffer != null ?
-                           currentPublishContext.bodyBuffer.readableBytes() : 0;
-        long expectedSize = currentPublishContext.expectedBodySize;
+            // Check if we've received the complete message
+            long receivedSize = currentPublishContext.bodyBuffer != null ?
+                               currentPublishContext.bodyBuffer.readableBytes() : 0;
+            long expectedSize = currentPublishContext.expectedBodySize;
 
-        logger.debug("Received content body: size={}, total={}/{}",
-                    payload.readableBytes(), receivedSize, expectedSize);
+            logger.debug("Received content body: size={}, total={}/{}",
+                        payload.readableBytes(), receivedSize, expectedSize);
 
-        if (receivedSize >= expectedSize) {
-            // Message complete - publish it
-            completePublish();
+            if (receivedSize >= expectedSize) {
+                // Message complete - publish it
+                completePublishLocked();
+            }
         }
     }
 
-    private void completePublish() {
+    // Must be called while holding publishLock
+    private void completePublishLocked() {
         PublishContext ctx = currentPublishContext;
         if (ctx == null) {
             return;
@@ -1184,14 +1197,21 @@ public class AmqpChannel {
             }
 
             // Publish the message - buffer if in transaction, otherwise execute immediately
-            if (inTransaction) {
-                transactionBuffer.add(new PublishAction(
-                    connection.getVirtualHost(),
-                    user,
-                    ctx.exchangeName,
-                    ctx.routingKey,
-                    ctx.message
-                ));
+            boolean buffered = false;
+            synchronized (transactionLock) {
+                if (inTransaction) {
+                    transactionBuffer.add(new PublishAction(
+                        connection.getVirtualHost(),
+                        user,
+                        ctx.exchangeName,
+                        ctx.routingKey,
+                        ctx.message
+                    ));
+                    buffered = true;
+                }
+            }
+
+            if (buffered) {
                 logger.debug("Buffered publish in transaction: exchange={}, routingKey={}",
                            ctx.exchangeName, ctx.routingKey);
             } else {
@@ -1239,10 +1259,18 @@ public class AmqpChannel {
                 unackedMessages.clear();
             }
 
-            // Clean up any pending publish context
-            if (currentPublishContext != null) {
-                currentPublishContext.releaseBuffer();
-                currentPublishContext = null;
+            // Clean up any pending publish context - synchronized to prevent race with publish
+            synchronized (publishLock) {
+                if (currentPublishContext != null) {
+                    currentPublishContext.releaseBuffer();
+                    currentPublishContext = null;
+                }
+            }
+
+            // Clean up any pending transaction
+            synchronized (transactionLock) {
+                transactionBuffer.clear();
+                inTransaction = false;
             }
 
             logger.debug("Channel {} closed", channelNumber);
@@ -1300,19 +1328,29 @@ public class AmqpChannel {
     }
     
     public void txSelect() {
-        inTransaction = true;
-        transactionBuffer.clear(); // Start with clean buffer
+        synchronized (transactionLock) {
+            inTransaction = true;
+            transactionBuffer.clear(); // Start with clean buffer
+        }
         logger.debug("Transaction started on channel {}", channelNumber);
     }
 
     public void txCommit() {
-        if (!inTransaction) {
-            throw new IllegalStateException("No transaction in progress");
+        List<TransactionAction> actionsToExecute;
+        synchronized (transactionLock) {
+            if (!inTransaction) {
+                throw new IllegalStateException("No transaction in progress");
+            }
+
+            // Copy actions and clear state while holding lock
+            actionsToExecute = new ArrayList<>(transactionBuffer);
+            transactionBuffer.clear();
+            inTransaction = false;
         }
 
-        // Execute all buffered actions
-        int actionCount = transactionBuffer.size();
-        for (TransactionAction action : transactionBuffer) {
+        // Execute actions outside of lock to avoid deadlocks
+        int actionCount = actionsToExecute.size();
+        for (TransactionAction action : actionsToExecute) {
             try {
                 action.execute();
             } catch (Exception e) {
@@ -1322,20 +1360,21 @@ public class AmqpChannel {
             }
         }
 
-        transactionBuffer.clear();
-        inTransaction = false;
         logger.info("Transaction committed on channel {}: {} actions executed", channelNumber, actionCount);
     }
 
     public void txRollback() {
-        if (!inTransaction) {
-            throw new IllegalStateException("No transaction in progress");
-        }
+        int actionCount;
+        synchronized (transactionLock) {
+            if (!inTransaction) {
+                throw new IllegalStateException("No transaction in progress");
+            }
 
-        // Discard all buffered actions
-        int actionCount = transactionBuffer.size();
-        transactionBuffer.clear();
-        inTransaction = false;
+            // Discard all buffered actions
+            actionCount = transactionBuffer.size();
+            transactionBuffer.clear();
+            inTransaction = false;
+        }
         logger.info("Transaction rolled back on channel {}: {} actions discarded", channelNumber, actionCount);
     }
 }

@@ -408,7 +408,8 @@ public class TransferTest {
         List<Object> fields = transfer.getFields();
 
         assertTrue(fields.size() >= 1);
-        assertEquals(10L, fields.get(0));
+        // handle is UInt per AMQP 1.0 spec
+        assertUIntEquals(10L, fields.get(0));
     }
 
     @Test
@@ -423,11 +424,20 @@ public class TransferTest {
         List<Object> fields = transfer.getFields();
 
         assertTrue(fields.size() >= 5);
-        assertEquals(0L, fields.get(0)); // handle
-        assertEquals(1L, fields.get(1)); // deliveryId
+        // handle, deliveryId, messageFormat are UInt per AMQP 1.0 spec
+        assertUIntEquals(0L, fields.get(0)); // handle
+        assertUIntEquals(1L, fields.get(1)); // deliveryId
         assertArrayEquals(new byte[]{0x01}, (byte[]) fields.get(2)); // deliveryTag
-        assertEquals(0L, fields.get(3)); // messageFormat
+        assertUIntEquals(0L, fields.get(3)); // messageFormat
         assertEquals(true, fields.get(4)); // settled
+    }
+
+    private void assertUIntEquals(long expected, Object actual) {
+        if (actual instanceof com.amqp.protocol.v10.types.UInt) {
+            assertEquals(expected, ((com.amqp.protocol.v10.types.UInt) actual).longValue());
+        } else {
+            assertEquals(expected, actual);
+        }
     }
 
     // --- toString Tests ---

@@ -109,9 +109,26 @@ public class BeginTest {
 
         assertTrue(fields.size() >= 4);
         assertNull(fields.get(0)); // remote channel is null
-        assertEquals(10L, fields.get(1)); // nextOutgoingId
-        assertEquals(100L, fields.get(2)); // incomingWindow
-        assertEquals(200L, fields.get(3)); // outgoingWindow
+        // Fields are UInt per AMQP 1.0 spec
+        assertUIntEquals(10L, fields.get(1)); // nextOutgoingId
+        assertUIntEquals(100L, fields.get(2)); // incomingWindow
+        assertUIntEquals(200L, fields.get(3)); // outgoingWindow
+    }
+
+    private void assertUIntEquals(long expected, Object actual) {
+        if (actual instanceof com.amqp.protocol.v10.types.UInt) {
+            assertEquals(expected, ((com.amqp.protocol.v10.types.UInt) actual).longValue());
+        } else {
+            assertEquals(expected, actual);
+        }
+    }
+
+    private void assertUShortEquals(int expected, Object actual) {
+        if (actual instanceof com.amqp.protocol.v10.types.UShort) {
+            assertEquals(expected, ((com.amqp.protocol.v10.types.UShort) actual).intValue());
+        } else {
+            assertEquals(expected, actual);
+        }
     }
 
     @Test
@@ -120,7 +137,8 @@ public class BeginTest {
         Begin begin = new Begin(0L, 100L, 100L).setRemoteChannel(5);
         List<Object> fields = begin.getFields();
 
-        assertEquals(Integer.valueOf(5), fields.get(0));
+        // remote-channel is UShort per AMQP 1.0 spec
+        assertUShortEquals(5, fields.get(0));
     }
 
     @Test

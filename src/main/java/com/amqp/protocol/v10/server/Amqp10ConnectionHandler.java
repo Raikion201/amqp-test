@@ -336,15 +336,22 @@ public class Amqp10ConnectionHandler extends ChannelInboundHandlerAdapter {
         long first = disposition.getFirst();
         long last = disposition.getLastOrFirst();
 
-        for (long deliveryId = first; deliveryId <= last; deliveryId++) {
-            // Find the link and delivery
-            for (Amqp10Link link : session.getLinks().values()) {
-                if (link.isSender()) {
-                    SenderLink sender = (SenderLink) link;
+        // Process disposition on each sender link
+        for (Amqp10Link link : session.getLinks().values()) {
+            if (link.isSender()) {
+                SenderLink sender = (SenderLink) link;
+                java.util.List<SenderLink.SenderDelivery> affectedDeliveries =
                     sender.onDisposition(disposition);
+
+                // Notify broker adapter for Released handling
+                for (SenderLink.SenderDelivery delivery : affectedDeliveries) {
+                    brokerAdapter.onSenderDisposition(session, sender, delivery, disposition.getState());
                 }
             }
+        }
 
+        // Settle deliveries in session
+        for (long deliveryId = first; deliveryId <= last; deliveryId++) {
             if (disposition.isSettled()) {
                 session.settleDelivery(deliveryId);
             }

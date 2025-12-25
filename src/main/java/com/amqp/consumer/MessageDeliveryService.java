@@ -208,6 +208,13 @@ public class MessageDeliveryService {
                     break; // Queue empty
                 }
 
+                // Check if message has expired
+                if (message.isExpired()) {
+                    logger.debug("Message expired, discarding: id={}, ttl={}, absoluteExpiry={}",
+                            message.getMessageId(), message.getTtl(), message.getAbsoluteExpiryTime());
+                    continue; // Skip expired message, don't re-queue
+                }
+
                 try {
                     long tag = deliveryTag.incrementAndGet();
                     logger.debug("Delivering message to consumer: {}, tag: {}", consumer.getConsumerTag(), tag);

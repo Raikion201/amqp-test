@@ -296,8 +296,17 @@ public class AttachTest {
 
         assertTrue(fields.size() >= 3);
         assertEquals("test", fields.get(0));
-        assertEquals(5L, fields.get(1));
+        // handle is UInt per AMQP 1.0 spec
+        assertUIntEquals(5L, fields.get(1));
         assertEquals(true, fields.get(2));
+    }
+
+    private void assertUIntEquals(long expected, Object actual) {
+        if (actual instanceof com.amqp.protocol.v10.types.UInt) {
+            assertEquals(expected, ((com.amqp.protocol.v10.types.UInt) actual).longValue());
+        } else {
+            assertEquals(expected, actual);
+        }
     }
 
     @Test

@@ -82,6 +82,7 @@ public class AmqpConnection {
             logger.error("Error handling frame on channel {}", channelNumber, e);
             closeChannel(channelNumber);
         }
+        // Note: Frame release is handled by the Netty pipeline/decoder, not here
     }
     
     public AmqpChannel openChannel(short channelNumber) {
@@ -109,6 +110,8 @@ public class AmqpConnection {
             nettyChannel.writeAndFlush(frame);
             logger.debug("Frame sent: type={}, channel={}, size={}", frame.getType(), frame.getChannel(), frame.getSize());
         } else {
+            // Release the frame's ByteBuf if we can't send it
+            frame.release();
             logger.warn("Cannot send frame - netty channel not active: type={}, channel={}, size={}", frame.getType(), frame.getChannel(), frame.getSize());
         }
     }

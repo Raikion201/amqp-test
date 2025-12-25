@@ -48,10 +48,13 @@ public class Header implements MessageSection {
     public DescribedType toDescribed() {
         List<Object> fields = new ArrayList<>();
         fields.add(durable);
-        fields.add(priority);
-        fields.add(ttl);
+        // Priority is ubyte in AMQP 1.0 spec - encode as UByte
+        fields.add(priority != null ? new com.amqp.protocol.v10.types.UByte(priority) : null);
+        // TTL is uint in AMQP 1.0 spec - encode as UInt
+        fields.add(ttl != null ? new com.amqp.protocol.v10.types.UInt(ttl) : null);
         fields.add(firstAcquirer);
-        fields.add(deliveryCount);
+        // delivery-count is uint in AMQP 1.0 spec - encode as UInt
+        fields.add(deliveryCount != null ? new com.amqp.protocol.v10.types.UInt(deliveryCount) : null);
 
         while (!fields.isEmpty() && fields.get(fields.size() - 1) == null) {
             fields.remove(fields.size() - 1);

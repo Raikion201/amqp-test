@@ -139,10 +139,12 @@ public class SenderLink extends Amqp10Link {
 
     /**
      * Handle disposition from the receiver.
+     * Returns list of affected deliveries for further processing (e.g., Released handling).
      */
-    public void onDisposition(Disposition disposition) {
+    public java.util.List<SenderDelivery> onDisposition(Disposition disposition) {
         long first = disposition.getFirst();
         long last = disposition.getLastOrFirst();
+        java.util.List<SenderDelivery> affectedDeliveries = new java.util.ArrayList<>();
 
         for (long deliveryId = first; deliveryId <= last; deliveryId++) {
             // Find the delivery by ID
@@ -150,6 +152,7 @@ public class SenderLink extends Amqp10Link {
                 if (delivery.getDeliveryId() == deliveryId) {
                     delivery.setRemoteState(disposition.getState());
                     delivery.setRemoteSettled(disposition.isSettled());
+                    affectedDeliveries.add(delivery);
 
                     if (disposition.isSettled()) {
                         // Receiver settled, we can remove from unsettled
@@ -160,6 +163,7 @@ public class SenderLink extends Amqp10Link {
                 }
             }
         }
+        return affectedDeliveries;
     }
 
     /**
@@ -206,6 +210,8 @@ public class SenderLink extends Amqp10Link {
         private Object remoteState;
         private boolean remoteSettled;
         private byte[] txnId; // Transaction ID if transactional
+        private String queueName; // Queue this message was delivered from (for requeue on Released)
+        private Object internalMessage; // Internal broker message for requeue on Released
 
         public SenderDelivery(long deliveryId, byte[] deliveryTag, Message10 message, boolean settled) {
             this.deliveryId = deliveryId;
@@ -268,6 +274,22 @@ public class SenderLink extends Amqp10Link {
 
         public boolean isTransactional() {
             return txnId != null;
+        }
+
+        public String getQueueName() {
+            return queueName;
+        }
+
+        public void setQueueName(String queueName) {
+            this.queueName = queueName;
+        }
+
+        public Object getInternalMessage() {
+            return internalMessage;
+        }
+
+        public void setInternalMessage(Object internalMessage) {
+            this.internalMessage = internalMessage;
         }
     }
 }

@@ -160,6 +160,30 @@ public class Message10 {
         return null;
     }
 
+    /**
+     * Check if the body is Data type.
+     */
+    public boolean isDataBody() {
+        MessageSection first = getFirstBody();
+        return first instanceof Data;
+    }
+
+    /**
+     * Check if the body is AmqpValue type.
+     */
+    public boolean isAmqpValueBody() {
+        MessageSection first = getFirstBody();
+        return first instanceof AmqpValue;
+    }
+
+    /**
+     * Check if the body is AmqpSequence type.
+     */
+    public boolean isAmqpSequenceBody() {
+        MessageSection first = getFirstBody();
+        return first instanceof AmqpSequence;
+    }
+
     // Footer
     public Footer getFooter() {
         return footer;

@@ -193,6 +193,10 @@ class DatabaseManagerTest {
                     "WHERE TABLE_NAME = 'EXCHANGES' ORDER BY ORDINAL_POSITION"
                 );
 
+                // First column is VHOST for multi-tenant support
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getString("COLUMN_NAME").toUpperCase()).isEqualTo("VHOST");
+
                 assertThat(rs.next()).isTrue();
                 assertThat(rs.getString("COLUMN_NAME").toUpperCase()).isEqualTo("NAME");
 
@@ -214,6 +218,10 @@ class DatabaseManagerTest {
                     "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS " +
                     "WHERE TABLE_NAME = 'QUEUES' ORDER BY ORDINAL_POSITION"
                 );
+
+                // First column is VHOST for multi-tenant support
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getString("COLUMN_NAME").toUpperCase()).isEqualTo("VHOST");
 
                 assertThat(rs.next()).isTrue();
                 assertThat(rs.getString("COLUMN_NAME").toUpperCase()).isEqualTo("NAME");

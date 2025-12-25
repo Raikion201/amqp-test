@@ -2,39 +2,49 @@ package com.amqp.connection;
 
 import com.amqp.amqp.AmqpFrame;
 import com.amqp.server.AmqpBroker;
+import com.amqp.persistence.DatabaseManager;
+import com.amqp.persistence.PersistenceManager;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
-import io.netty.channel.Channel;
+import io.netty.channel.embedded.EmbeddedChannel;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
 
 import static org.assertj.core.api.Assertions.*;
-import static org.mockito.Mockito.*;
 
 /**
  * Advanced edge case and error condition tests for AmqpConnection
  */
-@ExtendWith(MockitoExtension.class)
 @DisplayName("AMQP Connection Advanced Tests")
 class AmqpConnectionAdvancedTest {
 
-    @Mock
-    private Channel nettyChannel;
-
-    @Mock
+    private EmbeddedChannel nettyChannel;
     private AmqpBroker broker;
-
     private AmqpConnection connection;
 
     @BeforeEach
     void setUp() {
-        lenient().when(nettyChannel.isActive()).thenReturn(true);
+        nettyChannel = new EmbeddedChannel();
+        // Create a real broker with in-memory H2 database
+        DatabaseManager dbManager = new DatabaseManager(
+            "jdbc:h2:mem:test_" + System.currentTimeMillis() + ";DB_CLOSE_DELAY=-1;MODE=PostgreSQL",
+            "sa", "");
+        PersistenceManager persistenceManager = new PersistenceManager(dbManager);
+        broker = new AmqpBroker(persistenceManager, true);
         connection = new AmqpConnection(nettyChannel, broker);
+    }
+
+    @AfterEach
+    void tearDown() {
+        if (nettyChannel != null && nettyChannel.isOpen()) {
+            nettyChannel.close();
+        }
+        if (broker != null) {
+            broker.stop();
+        }
     }
 
     @Nested
@@ -136,15 +146,16 @@ class AmqpConnectionAdvancedTest {
         @Test
         @DisplayName("Should handle sending on inactive channel")
         void testSendOnInactiveChannel() {
-            when(nettyChannel.isActive()).thenReturn(false);
+            // Close the channel to make it inactive
+            nettyChannel.close();
 
             ByteBuf payload = Unpooled.buffer();
             payload.writeInt(123);
 
             connection.sendMethod((short) 1, (short) 10, (short) 20, payload);
 
-            // Should not attempt to send
-            verify(nettyChannel, never()).writeAndFlush(any());
+            // No frame should be written
+            assertThat((Object) nettyChannel.readOutbound()).isNull();
         }
 
         @Test
@@ -152,7 +163,9 @@ class AmqpConnectionAdvancedTest {
         void testSendMethodWithNullPayload() {
             connection.sendMethod((short) 1, (short) 10, (short) 20, null);
 
-            verify(nettyChannel, times(1)).writeAndFlush(any(AmqpFrame.class));
+            // Verify frame was written
+            AmqpFrame sentFrame = nettyChannel.readOutbound();
+            assertThat(sentFrame).isNotNull();
         }
 
         @Test
@@ -165,7 +178,9 @@ class AmqpConnectionAdvancedTest {
                 connection.sendContentHeader((short) 1, (short) 60, 1000L, properties)
             ).doesNotThrowAnyException();
 
-            verify(nettyChannel).writeAndFlush(any(AmqpFrame.class));
+            // Verify frame was written
+            AmqpFrame sentFrame = nettyChannel.readOutbound();
+            assertThat(sentFrame).isNotNull();
         }
 
         @Test
@@ -175,7 +190,9 @@ class AmqpConnectionAdvancedTest {
                 connection.sendContentHeader((short) 1, (short) 60, 1000L, null)
             ).doesNotThrowAnyException();
 
-            verify(nettyChannel).writeAndFlush(any(AmqpFrame.class));
+            // Verify frame was written
+            AmqpFrame sentFrame = nettyChannel.readOutbound();
+            assertThat(sentFrame).isNotNull();
         }
 
         @Test
@@ -187,7 +204,9 @@ class AmqpConnectionAdvancedTest {
                 connection.sendContentBody((short) 1, body)
             ).doesNotThrowAnyException();
 
-            verify(nettyChannel).writeAndFlush(any(AmqpFrame.class));
+            // Verify frame was written
+            AmqpFrame sentFrame = nettyChannel.readOutbound();
+            assertThat(sentFrame).isNotNull();
         }
 
         @Test
@@ -199,7 +218,9 @@ class AmqpConnectionAdvancedTest {
                 connection.sendContentBody((short) 1, body)
             ).doesNotThrowAnyException();
 
-            verify(nettyChannel).writeAndFlush(any(AmqpFrame.class));
+            // Verify frame was written
+            AmqpFrame sentFrame = nettyChannel.readOutbound();
+            assertThat(sentFrame).isNotNull();
         }
     }
 
@@ -227,7 +248,7 @@ class AmqpConnectionAdvancedTest {
         @DisplayName("Should handle connection state with inactive channel")
         void testConnectionStateInactiveChannel() {
             connection.setConnected(true);
-            when(nettyChannel.isActive()).thenReturn(false);
+            nettyChannel.close();
 
             assertThat(connection.isConnected()).isFalse();
         }
@@ -235,20 +256,18 @@ class AmqpConnectionAdvancedTest {
         @Test
         @DisplayName("Should require both connected flag and active channel")
         void testConnectionStateRequirements() {
-            // Connected but channel inactive
-            connection.setConnected(true);
-            when(nettyChannel.isActive()).thenReturn(false);
-            assertThat(connection.isConnected()).isFalse();
-
             // Channel active but not connected
+            assertThat(nettyChannel.isActive()).isTrue();
             connection.setConnected(false);
-            when(nettyChannel.isActive()).thenReturn(true);
             assertThat(connection.isConnected()).isFalse();
 
-            // Both required
+            // Both required - connected and active
             connection.setConnected(true);
-            when(nettyChannel.isActive()).thenReturn(true);
             assertThat(connection.isConnected()).isTrue();
+
+            // Connected but channel inactive
+            nettyChannel.close();
+            assertThat(connection.isConnected()).isFalse();
         }
     }
 
@@ -370,7 +389,12 @@ class AmqpConnectionAdvancedTest {
                 connection.sendMethod((short) 0, (short) 10, (short) 20, payload);
             }
 
-            verify(nettyChannel, times(1000)).writeAndFlush(any(AmqpFrame.class));
+            // Verify frames were written
+            int frameCount = 0;
+            while (nettyChannel.readOutbound() != null) {
+                frameCount++;
+            }
+            assertThat(frameCount).isEqualTo(1000);
         }
 
         @Test

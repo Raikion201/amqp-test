@@ -291,7 +291,8 @@ public class DispositionTest {
 
         assertTrue(fields.size() >= 2);
         assertEquals(true, fields.get(0)); // role
-        assertEquals(100L, fields.get(1)); // first
+        // first is UInt per AMQP 1.0 spec
+        assertUIntEquals(100L, fields.get(1)); // first
     }
 
     @Test
@@ -306,9 +307,18 @@ public class DispositionTest {
 
         assertTrue(fields.size() >= 5);
         assertEquals(true, fields.get(0)); // role
-        assertEquals(0L, fields.get(1)); // first
-        assertEquals(10L, fields.get(2)); // last
+        // first and last are UInt per AMQP 1.0 spec
+        assertUIntEquals(0L, fields.get(1)); // first
+        assertUIntEquals(10L, fields.get(2)); // last
         assertEquals(true, fields.get(3)); // settled
+    }
+
+    private void assertUIntEquals(long expected, Object actual) {
+        if (actual instanceof com.amqp.protocol.v10.types.UInt) {
+            assertEquals(expected, ((com.amqp.protocol.v10.types.UInt) actual).longValue());
+        } else {
+            assertEquals(expected, actual);
+        }
     }
 
     // --- toString Tests ---

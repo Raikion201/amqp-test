@@ -10,7 +10,12 @@ import org.slf4j.LoggerFactory;
 import java.util.List;
 
 public class AmqpCodec {
-    
+
+    // Security constants - prevent denial of service attacks
+    public static final int MAX_FRAME_SIZE = 1024 * 1024; // 1MB max frame
+    public static final int MAX_SHORT_STRING_LENGTH = 255;
+    public static final int MAX_LONG_STRING_LENGTH = 256 * 1024; // 256KB max string
+
     public static class AmqpFrameDecoder extends ByteToMessageDecoder {
         private static final int MIN_FRAME_SIZE = 8;
         
@@ -25,7 +30,13 @@ public class AmqpCodec {
             byte type = in.readByte();
             short channel = in.readShort();
             int size = in.readInt();
-            
+
+            // Security: Validate frame size to prevent DoS attacks
+            if (size < 0 || size > MAX_FRAME_SIZE) {
+                throw new IllegalArgumentException(
+                    "Invalid frame size: " + size + " (max: " + MAX_FRAME_SIZE + ")");
+            }
+
             if (in.readableBytes() < size + 1) {
                 in.readerIndex(readerIndex);
                 return;
@@ -97,6 +108,11 @@ public class AmqpCodec {
     
     public static String decodeShortString(ByteBuf buf) {
         int length = buf.readUnsignedByte();
+        // Security: Validate buffer has enough bytes
+        if (buf.readableBytes() < length) {
+            throw new IllegalArgumentException(
+                "Buffer underflow: need " + length + " bytes but only " + buf.readableBytes() + " available");
+        }
         byte[] bytes = new byte[length];
         buf.readBytes(bytes);
         return new String(bytes);
@@ -112,6 +128,16 @@ public class AmqpCodec {
     
     public static String decodeLongString(ByteBuf buf) {
         int length = buf.readInt();
+        // Security: Validate length to prevent DoS via unbounded allocation
+        if (length < 0 || length > MAX_LONG_STRING_LENGTH) {
+            throw new IllegalArgumentException(
+                "Invalid long string length: " + length + " (max: " + MAX_LONG_STRING_LENGTH + ")");
+        }
+        // Security: Validate buffer has enough bytes
+        if (buf.readableBytes() < length) {
+            throw new IllegalArgumentException(
+                "Buffer underflow: need " + length + " bytes but only " + buf.readableBytes() + " available");
+        }
         byte[] bytes = new byte[length];
         buf.readBytes(bytes);
         return new String(bytes);

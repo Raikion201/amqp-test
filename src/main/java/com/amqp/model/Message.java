@@ -3,6 +3,18 @@ package com.amqp.model;
 import java.util.Map;
 
 public class Message {
+    /**
+     * AMQP 1.0 body types.
+     */
+    public enum BodyType {
+        /** Body is raw binary data (Data section) */
+        DATA,
+        /** Body is a typed value (AmqpValue section) */
+        AMQP_VALUE,
+        /** Body is a sequence (AmqpSequence section) */
+        AMQP_SEQUENCE
+    }
+
     private long id;
     private String routingKey;
     private String contentType;
@@ -20,9 +32,15 @@ public class Message {
     private String appId;
     private String clusterId;
     private byte[] body;
+    private BodyType bodyType = BodyType.DATA; // Default to Data for AMQP 0-9-1 compatibility
+    private String subject; // AMQP 1.0 subject property
+    private Long ttl; // Time-to-live in milliseconds (from AMQP 1.0 Header)
+    private Long absoluteExpiryTime; // Absolute expiry time in milliseconds since epoch (from AMQP 1.0 Properties)
+    private long creationTime; // When the message was received by the broker
     
     public Message() {
         this.timestamp = System.currentTimeMillis();
+        this.creationTime = System.currentTimeMillis();
     }
     
     public Message(byte[] body) {
@@ -169,7 +187,79 @@ public class Message {
     public void setBody(byte[] body) {
         this.body = body;
     }
-    
+
+    public BodyType getBodyType() {
+        return bodyType;
+    }
+
+    public void setBodyType(BodyType bodyType) {
+        this.bodyType = bodyType;
+    }
+
+    public String getSubject() {
+        return subject;
+    }
+
+    public void setSubject(String subject) {
+        this.subject = subject;
+    }
+
+    public Long getTtl() {
+        return ttl;
+    }
+
+    public void setTtl(Long ttl) {
+        this.ttl = ttl;
+    }
+
+    public Long getAbsoluteExpiryTime() {
+        return absoluteExpiryTime;
+    }
+
+    public void setAbsoluteExpiryTime(Long absoluteExpiryTime) {
+        this.absoluteExpiryTime = absoluteExpiryTime;
+    }
+
+    public long getCreationTime() {
+        return creationTime;
+    }
+
+    public void setCreationTime(long creationTime) {
+        this.creationTime = creationTime;
+    }
+
+    /**
+     * Check if this message has expired based on TTL or absolute expiry time.
+     * @return true if the message has expired, false otherwise
+     */
+    public boolean isExpired() {
+        long now = System.currentTimeMillis();
+
+        // Check absolute expiry time first (takes precedence)
+        if (absoluteExpiryTime != null && absoluteExpiryTime > 0) {
+            return now >= absoluteExpiryTime;
+        }
+
+        // Check TTL (relative to creation time)
+        if (ttl != null && ttl > 0) {
+            long expiryTime = creationTime + ttl;
+            return now >= expiryTime;
+        }
+
+        // Check string expiration (AMQP 0-9-1 style, TTL in milliseconds as string)
+        if (expiration != null && !expiration.isEmpty()) {
+            try {
+                long ttlMs = Long.parseLong(expiration);
+                long expiryTime = creationTime + ttlMs;
+                return now >= expiryTime;
+            } catch (NumberFormatException e) {
+                // Invalid expiration format, treat as not expired
+            }
+        }
+
+        return false;
+    }
+
     @Override
     public String toString() {
         return String.format("Message{id=%d, routingKey='%s', contentType='%s', bodySize=%d}",

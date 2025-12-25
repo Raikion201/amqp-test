@@ -333,9 +333,10 @@ public class FlowTest {
 
         assertTrue(fields.size() >= 4);
         // nextIncomingId is null
-        assertEquals(100L, fields.get(1)); // incomingWindow
-        assertEquals(0L, fields.get(2));   // nextOutgoingId
-        assertEquals(50L, fields.get(3));  // outgoingWindow
+        // Fields are UInt per AMQP 1.0 spec
+        assertUIntEquals(100L, fields.get(1)); // incomingWindow
+        assertUIntEquals(0L, fields.get(2));   // nextOutgoingId
+        assertUIntEquals(50L, fields.get(3));  // outgoingWindow
     }
 
     @Test
@@ -349,9 +350,18 @@ public class FlowTest {
         List<Object> fields = flow.getFields();
 
         assertTrue(fields.size() >= 7);
-        assertEquals(5L, fields.get(4));  // handle
-        assertEquals(10L, fields.get(5)); // deliveryCount
-        assertEquals(20L, fields.get(6)); // linkCredit
+        // Fields are UInt per AMQP 1.0 spec
+        assertUIntEquals(5L, fields.get(4));  // handle
+        assertUIntEquals(10L, fields.get(5)); // deliveryCount
+        assertUIntEquals(20L, fields.get(6)); // linkCredit
+    }
+
+    private void assertUIntEquals(long expected, Object actual) {
+        if (actual instanceof com.amqp.protocol.v10.types.UInt) {
+            assertEquals(expected, ((com.amqp.protocol.v10.types.UInt) actual).longValue());
+        } else {
+            assertEquals(expected, actual);
+        }
     }
 
     // --- toString Tests ---

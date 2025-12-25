@@ -11,6 +11,11 @@ import java.util.*;
  */
 public class TypeDecoder {
 
+    // Security constants - prevent denial of service attacks
+    public static final int MAX_BINARY_SIZE = 16 * 1024 * 1024; // 16MB max binary
+    public static final int MAX_STRING_SIZE = 1024 * 1024; // 1MB max string
+    public static final int MAX_COLLECTION_SIZE = 10000; // Max elements in list/map/array
+
     /**
      * Decode any AMQP 1.0 value from the buffer.
      */
@@ -144,18 +149,48 @@ public class TypeDecoder {
     }
 
     private static byte[] readBytes(ByteBuf buffer, int length) {
+        // Security: Validate length to prevent DoS via unbounded allocation
+        if (length < 0 || length > MAX_BINARY_SIZE) {
+            throw new IllegalArgumentException(
+                "Invalid binary length: " + length + " (max: " + MAX_BINARY_SIZE + ")");
+        }
+        // Security: Validate buffer has enough bytes
+        if (buffer.readableBytes() < length) {
+            throw new IllegalArgumentException(
+                "Buffer underflow: need " + length + " bytes but only " + buffer.readableBytes() + " available");
+        }
         byte[] bytes = new byte[length];
         buffer.readBytes(bytes);
         return bytes;
     }
 
     private static String readString(ByteBuf buffer, int length) {
+        // Security: Validate length to prevent DoS via unbounded allocation
+        if (length < 0 || length > MAX_STRING_SIZE) {
+            throw new IllegalArgumentException(
+                "Invalid string length: " + length + " (max: " + MAX_STRING_SIZE + ")");
+        }
+        // Security: Validate buffer has enough bytes
+        if (buffer.readableBytes() < length) {
+            throw new IllegalArgumentException(
+                "Buffer underflow: need " + length + " bytes but only " + buffer.readableBytes() + " available");
+        }
         byte[] bytes = new byte[length];
         buffer.readBytes(bytes);
         return new String(bytes, StandardCharsets.UTF_8);
     }
 
     private static String readAsciiString(ByteBuf buffer, int length) {
+        // Security: Validate length to prevent DoS via unbounded allocation
+        if (length < 0 || length > MAX_STRING_SIZE) {
+            throw new IllegalArgumentException(
+                "Invalid symbol length: " + length + " (max: " + MAX_STRING_SIZE + ")");
+        }
+        // Security: Validate buffer has enough bytes
+        if (buffer.readableBytes() < length) {
+            throw new IllegalArgumentException(
+                "Buffer underflow: need " + length + " bytes but only " + buffer.readableBytes() + " available");
+        }
         byte[] bytes = new byte[length];
         buffer.readBytes(bytes);
         return new String(bytes, StandardCharsets.US_ASCII);
@@ -176,11 +211,16 @@ public class TypeDecoder {
     private static List<Object> decodeList32(ByteBuf buffer) {
         int size = buffer.readInt();
         int count = buffer.readInt();
+        // Security: Validate collection size
+        if (count < 0 || count > MAX_COLLECTION_SIZE) {
+            throw new IllegalArgumentException(
+                "Invalid list count: " + count + " (max: " + MAX_COLLECTION_SIZE + ")");
+        }
         return decodeListElements(buffer, count);
     }
 
     private static List<Object> decodeListElements(ByteBuf buffer, int count) {
-        List<Object> list = new ArrayList<>(count);
+        List<Object> list = new ArrayList<>(Math.min(count, 256)); // Don't pre-allocate huge arrays
         for (int i = 0; i < count; i++) {
             list.add(decode(buffer));
         }
@@ -196,11 +236,16 @@ public class TypeDecoder {
     private static Map<Object, Object> decodeMap32(ByteBuf buffer) {
         int size = buffer.readInt();
         int count = buffer.readInt();
+        // Security: Validate collection size
+        if (count < 0 || count > MAX_COLLECTION_SIZE * 2) {
+            throw new IllegalArgumentException(
+                "Invalid map count: " + count + " (max: " + (MAX_COLLECTION_SIZE * 2) + ")");
+        }
         return decodeMapElements(buffer, count / 2);
     }
 
     private static Map<Object, Object> decodeMapElements(ByteBuf buffer, int pairCount) {
-        Map<Object, Object> map = new LinkedHashMap<>(pairCount);
+        Map<Object, Object> map = new LinkedHashMap<>(Math.min(pairCount, 256)); // Don't pre-allocate huge maps
         for (int i = 0; i < pairCount; i++) {
             Object key = decode(buffer);
             Object value = decode(buffer);
@@ -219,12 +264,18 @@ public class TypeDecoder {
     private static Object[] decodeArray32(ByteBuf buffer) {
         int size = buffer.readInt();
         int count = buffer.readInt();
+        // Security: Validate collection size
+        if (count < 0 || count > MAX_COLLECTION_SIZE) {
+            throw new IllegalArgumentException(
+                "Invalid array count: " + count + " (max: " + MAX_COLLECTION_SIZE + ")");
+        }
         byte elementType = buffer.readByte();
         return decodeArrayElements(buffer, count, elementType);
     }
 
     private static Object[] decodeArrayElements(ByteBuf buffer, int count, byte elementType) {
-        Object[] array = new Object[count];
+        // Security: Don't pre-allocate huge arrays
+        Object[] array = new Object[Math.min(count, MAX_COLLECTION_SIZE)];
         for (int i = 0; i < count; i++) {
             array[i] = decodeFormatCode(elementType, buffer);
         }

@@ -15,6 +15,7 @@ import com.amqp.protocol.v10.transport.*;
 import com.amqp.server.AmqpBroker;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
+import com.amqp.protocol.v10.types.Symbol;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -54,10 +55,22 @@ public class BrokerAdapter10 {
     private static final java.util.concurrent.atomic.AtomicLong dynamicQueueCounter =
             new java.util.concurrent.atomic.AtomicLong(0);
 
+    // Shared scheduler for delayed message delivery - prevents thread leak
+    private static final java.util.concurrent.ScheduledExecutorService DELAYED_DELIVERY_SCHEDULER =
+            java.util.concurrent.Executors.newScheduledThreadPool(2,
+                    r -> {
+                        Thread t = new Thread(r, "amqp10-delayed-delivery");
+                        t.setDaemon(true);
+                        return t;
+                    });
+
     public BrokerAdapter10(AmqpBroker broker, Amqp10Connection connection) {
         this.broker = broker;
         this.connection = connection;
     }
+
+    // Anonymous relay links - links without a target address that route based on message "to" property
+    private final Map<String, Boolean> anonymousRelayLinks = new ConcurrentHashMap<>();
 
     /**
      * Called when a link is attached.
@@ -72,6 +85,11 @@ public class BrokerAdapter10 {
         String address = getAddress(link);
 
         if (address == null || address.isEmpty()) {
+            // Check if this is an anonymous relay link (receiver with null target)
+            if (link.isReceiver()) {
+                setupAnonymousRelayLink(session, (ReceiverLink) link);
+                return;
+            }
             log.warn("Link {} has no address", link.getName());
             return;
         }
@@ -83,6 +101,14 @@ public class BrokerAdapter10 {
             // We're receiving from client, so link target is a queue/exchange
             setupReceiverLink(session, (ReceiverLink) link, address);
         }
+    }
+
+    /**
+     * Set up an anonymous relay link - messages are routed based on their "to" property.
+     */
+    private void setupAnonymousRelayLink(Amqp10Session session, ReceiverLink link) {
+        log.info("Setting up anonymous relay link '{}'", link.getName());
+        anonymousRelayLinks.put(link.getName(), true);
     }
 
     private void setupCoordinatorLink(Amqp10Session session, CoordinatorLink link) {
@@ -216,6 +242,7 @@ public class BrokerAdapter10 {
 
         linkToQueue.remove(link.getName());
         linkToExchange.remove(link.getName());
+        anonymousRelayLinks.remove(link.getName());
     }
 
     /**
@@ -260,17 +287,40 @@ public class BrokerAdapter10 {
             // Convert to internal message format
             Message message = convertToInternalMessage(message10);
 
-            // Route the message
-            String exchangeName = linkToExchange.get(linkName);
-            if (exchangeName != null) {
-                // Publish to exchange
-                String routingKey = getRoutingKey(message10);
-                publishToExchange(exchangeName, routingKey, message);
+            // Check for scheduled delivery annotations
+            long scheduledDelay = getScheduledDelay(message10);
+            if (scheduledDelay > 0) {
+                // Schedule the message for later delivery
+                scheduleMessageDelivery(linkName, message10, message, scheduledDelay);
+                // Send disposition with Accepted
+                if (!transfer.isSettled()) {
+                    sendDisposition(session, link, transfer.getDeliveryId(), Accepted.INSTANCE, true);
+                }
+                return;
+            }
+
+            // Check if this is an anonymous relay link
+            if (anonymousRelayLinks.containsKey(linkName)) {
+                // Route based on message "to" property
+                String toAddress = getMessageToAddress(message10);
+                if (toAddress != null && !toAddress.isEmpty()) {
+                    routeMessageToAddress(toAddress, message, message10);
+                } else {
+                    log.warn("Anonymous relay message has no 'to' address, dropping");
+                }
             } else {
-                // Publish directly to queue
-                String queueName = linkToQueue.get(linkName);
-                if (queueName != null) {
-                    publishToQueue(queueName, message);
+                // Route the message normally
+                String exchangeName = linkToExchange.get(linkName);
+                if (exchangeName != null) {
+                    // Publish to exchange
+                    String routingKey = getRoutingKey(message10);
+                    publishToExchange(exchangeName, routingKey, message);
+                } else {
+                    // Publish directly to queue
+                    String queueName = linkToQueue.get(linkName);
+                    if (queueName != null) {
+                        publishToQueue(queueName, message);
+                    }
                 }
             }
 
@@ -285,10 +335,118 @@ public class BrokerAdapter10 {
         }
     }
 
+    /**
+     * Get the message "to" address for anonymous relay routing.
+     */
+    private String getMessageToAddress(Message10 message10) {
+        Properties props = message10.getProperties();
+        if (props != null && props.getTo() != null) {
+            return props.getTo();
+        }
+        return null;
+    }
+
+    /**
+     * Route a message to the specified address (for anonymous relay).
+     */
+    private void routeMessageToAddress(String address, Message message, Message10 message10) {
+        // Check if it's an exchange
+        Exchange exchange = broker.getExchange(address);
+        if (exchange != null) {
+            String routingKey = getRoutingKey(message10);
+            publishToExchange(address, routingKey, message);
+        } else {
+            // Treat as queue - ensure it exists
+            Queue queue = broker.getQueue(address);
+            if (queue == null) {
+                queue = broker.declareQueue(address, false, false, false);
+            }
+            publishToQueue(address, message);
+        }
+        log.debug("Routed anonymous relay message to '{}'", address);
+    }
+
+    /**
+     * Get the scheduled delivery delay from message annotations.
+     * Returns 0 if no scheduling is requested.
+     */
+    private long getScheduledDelay(Message10 message10) {
+        MessageAnnotations annotations = message10.getMessageAnnotations();
+        if (annotations == null) {
+            return 0;
+        }
+
+        Map<Symbol, Object> values = annotations.getValue();
+        if (values == null) {
+            return 0;
+        }
+
+        // Check for x-opt-delivery-time (absolute timestamp)
+        Object deliveryTime = values.get(Symbol.valueOf("x-opt-delivery-time"));
+        if (deliveryTime instanceof Number) {
+            long scheduledTime = ((Number) deliveryTime).longValue();
+            long delay = scheduledTime - System.currentTimeMillis();
+            if (delay > 0) {
+                return delay;
+            }
+            // Already past, deliver immediately
+            return 0;
+        }
+
+        // Check for x-opt-delivery-delay (relative delay in milliseconds)
+        Object deliveryDelay = values.get(Symbol.valueOf("x-opt-delivery-delay"));
+        if (deliveryDelay instanceof Number) {
+            long delay = ((Number) deliveryDelay).longValue();
+            return delay > 0 ? delay : 0;
+        }
+
+        return 0;
+    }
+
+    /**
+     * Schedule a message for delayed delivery.
+     */
+    private void scheduleMessageDelivery(String linkName, Message10 message10, Message message, long delayMs) {
+        String queueName = linkToQueue.get(linkName);
+        String exchangeName = linkToExchange.get(linkName);
+
+        // Check for anonymous relay
+        if (anonymousRelayLinks.containsKey(linkName)) {
+            queueName = getMessageToAddress(message10);
+        }
+
+        final String targetQueue = queueName;
+        final String targetExchange = exchangeName;
+        final String routingKey = getRoutingKey(message10);
+
+        log.info("Scheduling message delivery in {}ms to {}", delayMs,
+                targetQueue != null ? targetQueue : targetExchange);
+
+        // Use the shared scheduler to delay delivery (prevents thread leak)
+        DELAYED_DELIVERY_SCHEDULER.schedule(() -> {
+            try {
+                if (targetExchange != null) {
+                    publishToExchange(targetExchange, routingKey, message);
+                } else if (targetQueue != null) {
+                    // Ensure queue exists
+                    Queue queue = broker.getQueue(targetQueue);
+                    if (queue == null) {
+                        broker.declareQueue(targetQueue, false, false, false);
+                    }
+                    publishToQueue(targetQueue, message);
+                }
+                log.debug("Delivered scheduled message to {}",
+                        targetQueue != null ? targetQueue : targetExchange);
+            } catch (Exception e) {
+                log.error("Error delivering scheduled message", e);
+            }
+        }, delayMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+    }
+
     private Message convertToInternalMessage(Message10 message10) {
         Message message = new Message();
 
-        // Extract body
+        // Extract body and preserve body type
         byte[] body = message10.getBodyAsBytes();
         if (body != null) {
             message.setBody(body);
@@ -297,6 +455,15 @@ public class BrokerAdapter10 {
             if (bodyStr != null) {
                 message.setBody(bodyStr.getBytes());
             }
+        }
+
+        // Preserve AMQP 1.0 body type
+        if (message10.isDataBody()) {
+            message.setBodyType(Message.BodyType.DATA);
+        } else if (message10.isAmqpValueBody()) {
+            message.setBodyType(Message.BodyType.AMQP_VALUE);
+        } else if (message10.isAmqpSequenceBody()) {
+            message.setBodyType(Message.BodyType.AMQP_SEQUENCE);
         }
 
         // Copy properties
@@ -314,18 +481,36 @@ public class BrokerAdapter10 {
             if (props.getReplyTo() != null) {
                 message.setReplyTo(props.getReplyTo());
             }
+            if (props.getSubject() != null) {
+                message.setSubject(props.getSubject());
+            }
         }
 
         // Copy header settings
         Header header = message10.getHeader();
         if (header != null) {
+            log.debug("Message has Header: durable={}, priority={}, ttl={}",
+                    header.getDurable(), header.getPriority(), header.getTtl());
             message.setDeliveryMode((short) (header.isDurable() ? 2 : 1));
             if (header.getPriority() != null) {
                 message.setPriority(header.getPriority().shortValue());
             }
             if (header.getTtl() != null) {
-                message.setExpiration(String.valueOf(System.currentTimeMillis() + header.getTtl()));
+                // Set TTL for proper expiry checking
+                message.setTtl(header.getTtl());
+                long expiration = System.currentTimeMillis() + header.getTtl();
+                message.setExpiration(String.valueOf(expiration));
+                log.debug("Set message TTL to {}ms, expiration={}", header.getTtl(), expiration);
             }
+        } else {
+            log.debug("Message has no Header section");
+        }
+
+        // Extract absolute expiry time from Properties
+        if (props != null && props.getAbsoluteExpiryTime() != null) {
+            long absExpiryTime = props.getAbsoluteExpiryTime().getTime();
+            message.setAbsoluteExpiryTime(absExpiryTime);
+            log.debug("Set message absolute expiry time to {}", absExpiryTime);
         }
 
         // Copy application properties
@@ -379,7 +564,10 @@ public class BrokerAdapter10 {
         Queue queue = broker.getQueue(queueName);
         if (queue != null) {
             queue.enqueue(message);
-            log.debug("Published message to queue '{}'", queueName);
+            log.debug("Published message to queue '{}', queue@{}, size after enqueue: {}",
+                    queueName, System.identityHashCode(queue), queue.size());
+        } else {
+            log.warn("Queue '{}' not found for publishing", queueName);
         }
     }
 
@@ -394,14 +582,20 @@ public class BrokerAdapter10 {
     private void deliverMessages(Amqp10Session session, SenderLink link, String queueName) {
         Queue queue = broker.getQueue(queueName);
         if (queue == null) {
+            log.debug("deliverMessages: Queue '{}' not found", queueName);
             return;
         }
+
+        log.debug("deliverMessages: Queue '{}' queue@{} has {} messages, link hasCredit={}, isAttached={}",
+                queueName, System.identityHashCode(queue), queue.size(), link.hasCredit(), link.isAttached());
 
         while (link.hasCredit() && link.isAttached()) {
             Message message = queue.dequeue();
             if (message == null) {
+                log.debug("deliverMessages: No more messages in queue '{}'", queueName);
                 break;
             }
+            log.debug("deliverMessages: Dequeued message from '{}', expiration={}", queueName, message.getExpiration());
 
             try {
                 // Check TTL - if message has expired, skip it
@@ -426,6 +620,12 @@ public class BrokerAdapter10 {
                     break;
                 }
 
+                // Track queue name and internal message for requeue on Released
+                delivery.setQueueName(queueName);
+                delivery.setInternalMessage(message);
+                log.debug("Set delivery tracking: deliveryId={}, queueName={}, message={}",
+                        delivery.getDeliveryId(), queueName, message.getMessageId());
+
                 // Actually send the Transfer frame over the wire
                 sendTransfer(session, delivery.getTransfer());
                 log.debug("Delivered message to link '{}'", link.getName());
@@ -440,20 +640,11 @@ public class BrokerAdapter10 {
     }
 
     /**
-     * Check if a message has expired based on its TTL.
+     * Check if a message has expired based on TTL, absolute expiry time, or string expiration.
      */
     private boolean isMessageExpired(Message message) {
-        String expiration = message.getExpiration();
-        if (expiration == null || expiration.isEmpty()) {
-            return false;
-        }
-
-        try {
-            long expirationTime = Long.parseLong(expiration);
-            return Header.isExpiredAt(expirationTime);
-        } catch (NumberFormatException e) {
-            return false;
-        }
+        // Use the comprehensive isExpired() method from Message
+        return message.isExpired();
     }
 
     /**
@@ -523,10 +714,21 @@ public class BrokerAdapter10 {
     private Message10 convertToAmqp10Message(Message message) {
         Message10 message10 = new Message10();
 
-        // Set body
+        // Set body - preserve the original body type
         byte[] body = message.getBody();
         if (body != null) {
-            message10.setBody(new Data(body));
+            Message.BodyType bodyType = message.getBodyType();
+            if (bodyType == Message.BodyType.AMQP_VALUE) {
+                // Convert bytes back to string for AmqpValue
+                String text = new String(body, java.nio.charset.StandardCharsets.UTF_8);
+                message10.setBody(new AmqpValue(text));
+            } else if (bodyType == Message.BodyType.AMQP_SEQUENCE) {
+                // AmqpSequence - just use Data for now as sequence conversion is complex
+                message10.setBody(new Data(body));
+            } else {
+                // Default to Data (preserves binary content)
+                message10.setBody(new Data(body));
+            }
         }
 
         // Set header
@@ -550,6 +752,13 @@ public class BrokerAdapter10 {
         }
         if (message.getReplyTo() != null) {
             props.setReplyTo(message.getReplyTo());
+        }
+        if (message.getSubject() != null) {
+            props.setSubject(message.getSubject());
+        }
+        // Preserve absolute expiry time
+        if (message.getAbsoluteExpiryTime() != null && message.getAbsoluteExpiryTime() > 0) {
+            props.setAbsoluteExpiryTime(new java.util.Date(message.getAbsoluteExpiryTime()));
         }
         message10.setProperties(props);
 
@@ -577,24 +786,82 @@ public class BrokerAdapter10 {
 
     /**
      * Send a Transfer frame over the wire.
+     * Handles multi-frame transfers for large messages.
      */
     private void sendTransfer(Amqp10Session session, Transfer transfer) {
         Channel channel = connection.getChannel();
-        ByteBuf body = channel.alloc().buffer();
-
-        // Encode transfer performative
-        transfer.encode(body);
-
-        // Append message payload
         ByteBuf payload = transfer.getPayload();
-        if (payload != null && payload.isReadable()) {
-            body.writeBytes(payload);
+
+        // Get the negotiated max frame size
+        int maxFrameSize = connection.getMaxFrameSize();
+
+        // Calculate overhead for frame header (8 bytes) and estimated performative size
+        // Frame header: 4 (size) + 1 (doff) + 1 (type) + 2 (channel) = 8 bytes
+        // Performative overhead: ~50 bytes for Transfer with typical fields
+        int frameOverhead = 8 + 64; // Conservative estimate
+        int maxPayloadPerFrame = maxFrameSize - frameOverhead;
+
+        if (maxPayloadPerFrame < 256) {
+            maxPayloadPerFrame = 256; // Minimum reasonable payload size
         }
 
-        Amqp10Frame frame = new Amqp10Frame(FrameType.AMQP, session.getLocalChannel(), body);
-        channel.writeAndFlush(frame);
+        if (payload == null || !payload.isReadable() || payload.readableBytes() <= maxPayloadPerFrame) {
+            // Small message - send in single frame
+            ByteBuf body = channel.alloc().buffer();
+            transfer.encode(body);
 
-        log.trace("Sent Transfer on channel {}", session.getLocalChannel());
+            if (payload != null && payload.isReadable()) {
+                body.writeBytes(payload);
+            }
+
+            Amqp10Frame frame = new Amqp10Frame(FrameType.AMQP, session.getLocalChannel(), body);
+            channel.writeAndFlush(frame);
+            log.trace("Sent Transfer on channel {} (single frame)", session.getLocalChannel());
+        } else {
+            // Large message - split into multiple frames
+            int totalBytes = payload.readableBytes();
+            int offset = 0;
+            int frameCount = 0;
+
+            log.debug("Splitting large message ({} bytes) into multiple frames (max {} bytes per frame)",
+                    totalBytes, maxPayloadPerFrame);
+
+            while (offset < totalBytes) {
+                int remaining = totalBytes - offset;
+                int chunkSize = Math.min(remaining, maxPayloadPerFrame);
+                boolean hasMore = (offset + chunkSize) < totalBytes;
+
+                // Create a new Transfer for this chunk
+                Transfer chunkTransfer = new Transfer(transfer.getHandle());
+
+                // Only first frame has delivery-id and delivery-tag
+                if (offset == 0) {
+                    chunkTransfer.setDeliveryId(transfer.getDeliveryId());
+                    chunkTransfer.setDeliveryTag(transfer.getDeliveryTag());
+                    chunkTransfer.setMessageFormat(transfer.getMessageFormat());
+                    chunkTransfer.setSettled(transfer.getSettled());
+                }
+
+                // Set more flag (true if there are more frames coming)
+                chunkTransfer.setMore(hasMore);
+
+                // Encode frame
+                ByteBuf body = channel.alloc().buffer();
+                chunkTransfer.encode(body);
+
+                // Write chunk of payload
+                body.writeBytes(payload, offset, chunkSize);
+
+                Amqp10Frame frame = new Amqp10Frame(FrameType.AMQP, session.getLocalChannel(), body);
+                channel.writeAndFlush(frame);
+
+                offset += chunkSize;
+                frameCount++;
+            }
+
+            log.debug("Sent Transfer on channel {} ({} frames for {} bytes)",
+                    session.getLocalChannel(), frameCount, totalBytes);
+        }
     }
 
     /**
@@ -610,6 +877,76 @@ public class BrokerAdapter10 {
         channel.writeAndFlush(frame);
 
         log.trace("Sent {} on channel {}", performative.getClass().getSimpleName(), session.getLocalChannel());
+    }
+
+    /**
+     * Handle disposition received from the client for a sender link.
+     * This is called when the client sends Accepted, Released, Rejected, etc.
+     */
+    public void onSenderDisposition(Amqp10Session session, SenderLink link,
+                                     SenderLink.SenderDelivery delivery, Object state) {
+        log.debug("onSenderDisposition: link={}, deliveryId={}, state={}, stateClass={}",
+                link.getName(), delivery.getDeliveryId(), state,
+                state != null ? state.getClass().getName() : "null");
+
+        // Check if Released - need to requeue message
+        if (isReleasedState(state)) {
+            String queueName = delivery.getQueueName();
+            Object internalMsg = delivery.getInternalMessage();
+
+            log.debug("Released state detected: queueName={}, internalMsg={}",
+                    queueName, internalMsg != null ? internalMsg.getClass().getName() : "null");
+
+            if (queueName != null && internalMsg instanceof Message) {
+                Message message = (Message) internalMsg;
+                Queue queue = broker.getQueue(queueName);
+                if (queue != null) {
+                    queue.enqueue(message);
+                    log.info("Released message requeued to queue '{}'", queueName);
+                } else {
+                    log.warn("Cannot requeue Released message - queue '{}' not found", queueName);
+                }
+            } else {
+                log.debug("Released disposition but no queue/message info available: queueName={}, internalMsgType={}",
+                        queueName, internalMsg != null ? internalMsg.getClass().getName() : "null");
+            }
+        }
+        // For Accepted, just log - message is already removed from queue
+        else if (isAcceptedState(state)) {
+            log.debug("Message accepted by receiver on link '{}'", link.getName());
+        }
+        // For Rejected, we could dead-letter the message, but for now just log
+        else if (isRejectedState(state)) {
+            log.debug("Message rejected by receiver on link '{}', discarding", link.getName());
+        }
+    }
+
+    private boolean isReleasedState(Object state) {
+        if (state == null) return false;
+        if (state instanceof com.amqp.protocol.v10.delivery.Released) return true;
+        // Check for DescribedType with Released descriptor (0x26)
+        if (state instanceof com.amqp.protocol.v10.types.DescribedType) {
+            com.amqp.protocol.v10.types.DescribedType described =
+                (com.amqp.protocol.v10.types.DescribedType) state;
+            Object descriptor = described.getDescriptor();
+            if (descriptor instanceof Number) {
+                return ((Number) descriptor).longValue() == 0x0000000000000026L;
+            }
+        }
+        // Check class name as fallback
+        return state.getClass().getSimpleName().equals("Released");
+    }
+
+    private boolean isAcceptedState(Object state) {
+        if (state == null) return false;
+        if (state instanceof com.amqp.protocol.v10.delivery.Accepted) return true;
+        if (state instanceof Accepted) return true;
+        return state.getClass().getSimpleName().equals("Accepted");
+    }
+
+    private boolean isRejectedState(Object state) {
+        if (state == null) return false;
+        return state.getClass().getSimpleName().equals("Rejected");
     }
 
     // Transaction support methods
