@@ -176,13 +176,34 @@ public class Amqp10Connection {
 
     // Session management
     public Amqp10Session createSession() {
+        // Check if we've hit the session limit based on actual open sessions
+        if (sessions.size() >= channelMax) {
+            throw new IllegalStateException(
+                "Maximum session count reached: " + channelMax + " sessions already open");
+        }
+
+        // Find the next available channel ID
         int channelId = nextChannelId.getAndIncrement();
+
+        // Safety check: ensure we don't overflow past the negotiated limit
         if (channelId > channelMax) {
-            throw new IllegalStateException("Channel max exceeded");
+            // Try to find an available channel ID (reuse closed channel slots)
+            channelId = -1;
+            for (int i = 0; i <= channelMax; i++) {
+                if (!sessions.containsKey(i)) {
+                    channelId = i;
+                    break;
+                }
+            }
+            if (channelId == -1) {
+                throw new IllegalStateException("No available channel IDs within channel-max limit");
+            }
         }
 
         Amqp10Session session = new Amqp10Session(this, channelId);
         sessions.put(channelId, session);
+        log.debug("Created session on channel {} (total sessions: {}/{})",
+                channelId, sessions.size(), channelMax);
         return session;
     }
 

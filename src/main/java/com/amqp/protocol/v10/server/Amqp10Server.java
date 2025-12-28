@@ -46,7 +46,7 @@ public class Amqp10Server {
     private Channel serverChannel;
 
     // Server configuration
-    private int maxFrameSize = 16384;
+    private int maxFrameSize = 1024 * 1024; // 1MB to support large messages
     private int idleTimeout = 60000;
     private boolean requireSasl = true;
 

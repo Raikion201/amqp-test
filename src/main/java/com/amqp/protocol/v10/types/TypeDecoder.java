@@ -205,6 +205,11 @@ public class TypeDecoder {
     private static List<Object> decodeList8(ByteBuf buffer) {
         int size = buffer.readUnsignedByte();
         int count = buffer.readUnsignedByte();
+        // Security: Validate collection size (even for 8-bit, enforce limits)
+        if (count > MAX_COLLECTION_SIZE) {
+            throw new IllegalArgumentException(
+                "Invalid list count: " + count + " (max: " + MAX_COLLECTION_SIZE + ")");
+        }
         return decodeListElements(buffer, count);
     }
 
@@ -230,6 +235,11 @@ public class TypeDecoder {
     private static Map<Object, Object> decodeMap8(ByteBuf buffer) {
         int size = buffer.readUnsignedByte();
         int count = buffer.readUnsignedByte();
+        // Security: Validate collection size (even for 8-bit, enforce limits)
+        if (count > MAX_COLLECTION_SIZE * 2) {
+            throw new IllegalArgumentException(
+                "Invalid map count: " + count + " (max: " + (MAX_COLLECTION_SIZE * 2) + ")");
+        }
         return decodeMapElements(buffer, count / 2);
     }
 
@@ -257,6 +267,11 @@ public class TypeDecoder {
     private static Object[] decodeArray8(ByteBuf buffer) {
         int size = buffer.readUnsignedByte();
         int count = buffer.readUnsignedByte();
+        // Security: Validate collection size (even for 8-bit, enforce limits)
+        if (count > MAX_COLLECTION_SIZE) {
+            throw new IllegalArgumentException(
+                "Invalid array count: " + count + " (max: " + MAX_COLLECTION_SIZE + ")");
+        }
         byte elementType = buffer.readByte();
         return decodeArrayElements(buffer, count, elementType);
     }

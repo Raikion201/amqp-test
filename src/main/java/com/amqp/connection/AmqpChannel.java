@@ -25,6 +25,35 @@ import java.util.ArrayList;
 public class AmqpChannel {
     private static final Logger logger = LoggerFactory.getLogger(AmqpChannel.class);
 
+    // Security limits to prevent DoS attacks
+    private static final long MAX_BODY_SIZE = 128 * 1024 * 1024; // 128MB max message body
+    private static final int MAX_TRANSACTION_ACTIONS = 10000; // Max buffered transaction actions
+
+    /**
+     * Get the authenticated user for this connection, or null if not authenticated.
+     * Unlike previous code, this does NOT fall back to guest user - authentication is required.
+     */
+    private com.amqp.security.User getAuthenticatedUser() {
+        com.amqp.security.User user = connection.getUser();
+        if (user == null) {
+            logger.error("No authenticated user on connection for channel {}", channelNumber);
+        }
+        return user;
+    }
+
+    /**
+     * Send an access refused error and close the channel.
+     */
+    private void sendAccessRefusedAndClose(String message) {
+        ByteBuf errorPayload = Unpooled.buffer();
+        errorPayload.writeShort(AmqpConstants.REPLY_ACCESS_REFUSED);
+        AmqpCodec.encodeShortString(errorPayload, message);
+        errorPayload.writeShort(0);
+        errorPayload.writeShort(0);
+        connection.sendMethod(channelNumber, AmqpConstants.CLASS_CHANNEL,
+                             AmqpConstants.METHOD_CHANNEL_CLOSE, errorPayload);
+    }
+
     private final short channelNumber;
     private final AmqpConnection connection;
     private final AmqpBroker broker;
@@ -384,6 +413,17 @@ public class AmqpChannel {
     private void handleConnectionStartOk(ByteBuf payload) {
         // client-properties is a table: 4-byte length + table data
         int tableLength = payload.readInt();
+        // Security: Validate table length to prevent buffer overread
+        if (tableLength < 0) {
+            logger.error("Negative table length in Connection.Start-Ok: {}", tableLength);
+            sendAuthenticationError("Invalid client properties");
+            return;
+        }
+        if (tableLength > payload.readableBytes()) {
+            logger.error("Table length exceeds available bytes: {} > {}", tableLength, payload.readableBytes());
+            sendAuthenticationError("Invalid client properties");
+            return;
+        }
         if (tableLength > 0) {
             payload.skipBytes(tableLength); // Skip the table data
         }
@@ -852,9 +892,11 @@ public class AmqpChannel {
                 Short deliveryMode = message.getDeliveryMode();
                 Short priority = message.getPriority();
                 Long timestamp = message.getTimestamp();
+                java.util.Map<String, Object> headers = message.getHeaders();
 
                 if (message.getContentType() != null) propertyFlags |= (1 << 15);
                 if (message.getContentEncoding() != null) propertyFlags |= (1 << 14);
+                if (headers != null && !headers.isEmpty()) propertyFlags |= (1 << 13);
                 if (deliveryMode != null) propertyFlags |= (1 << 12);
                 if (priority != null) propertyFlags |= (1 << 11);
                 if (message.getCorrelationId() != null) propertyFlags |= (1 << 10);
@@ -874,6 +916,9 @@ public class AmqpChannel {
                 }
                 if (message.getContentEncoding() != null) {
                     AmqpCodec.encodeShortString(headerPayload, message.getContentEncoding());
+                }
+                if (headers != null && !headers.isEmpty()) {
+                    AmqpCodec.encodeTable(headerPayload, headers);
                 }
                 if (deliveryMode != null) {
                     headerPayload.writeByte(deliveryMode);
@@ -1095,8 +1140,9 @@ public class AmqpChannel {
             message.setContentEncoding(AmqpCodec.decodeShortString(payload));
         }
         if ((propertyFlags & (1 << 13)) != 0) {
-            // headers table - skip for now
-            payload.skipBytes(4); // table size
+            // headers table - decode the table
+            java.util.Map<String, Object> headers = AmqpCodec.decodeTable(payload);
+            message.setHeaders(headers);
         }
         if ((propertyFlags & (1 << 12)) != 0) {
             message.setDeliveryMode(payload.readByte());
@@ -1129,6 +1175,22 @@ public class AmqpChannel {
             message.setAppId(AmqpCodec.decodeShortString(payload));
         }
 
+            // Security: Validate body size to prevent DoS via unbounded allocation
+            if (bodySize < 0 || bodySize > MAX_BODY_SIZE) {
+                logger.error("Message body size exceeds maximum: {} > {}", bodySize, MAX_BODY_SIZE);
+                currentPublishContext.releaseBuffer();
+                currentPublishContext = null;
+                // Send channel error - body too large
+                ByteBuf errorPayload = Unpooled.buffer();
+                errorPayload.writeShort(AmqpConstants.REPLY_FRAME_ERROR);
+                AmqpCodec.encodeShortString(errorPayload, "Message body too large");
+                errorPayload.writeShort(AmqpConstants.CLASS_BASIC);
+                errorPayload.writeShort(AmqpConstants.METHOD_BASIC_PUBLISH);
+                connection.sendMethod(channelNumber, AmqpConstants.CLASS_CHANNEL,
+                                     AmqpConstants.METHOD_CHANNEL_CLOSE, errorPayload);
+                return;
+            }
+
             // Initialize body buffer if needed
             if (bodySize > 0) {
                 currentPublishContext.bodyBuffer = Unpooled.buffer((int) bodySize);
@@ -1152,6 +1214,27 @@ public class AmqpChannel {
             }
 
             ByteBuf payload = frame.getPayload();
+            long currentSize = currentPublishContext.bodyBuffer != null ?
+                              currentPublishContext.bodyBuffer.readableBytes() : 0;
+            long expectedSize = currentPublishContext.expectedBodySize;
+            int incomingSize = payload.readableBytes();
+
+            // Security: Check if adding this frame would exceed expected size
+            if (currentSize + incomingSize > expectedSize) {
+                logger.error("Body frame would exceed expected size: received={}, incoming={}, expected={}",
+                            currentSize, incomingSize, expectedSize);
+                currentPublishContext.releaseBuffer();
+                currentPublishContext = null;
+                // Send channel error
+                ByteBuf errorPayload = Unpooled.buffer();
+                errorPayload.writeShort(AmqpConstants.REPLY_FRAME_ERROR);
+                AmqpCodec.encodeShortString(errorPayload, "Body frames exceed declared size");
+                errorPayload.writeShort(AmqpConstants.CLASS_BASIC);
+                errorPayload.writeShort(AmqpConstants.METHOD_BASIC_PUBLISH);
+                connection.sendMethod(channelNumber, AmqpConstants.CLASS_CHANNEL,
+                                     AmqpConstants.METHOD_CHANNEL_CLOSE, errorPayload);
+                return;
+            }
 
             // Append body data
             if (currentPublishContext.bodyBuffer != null) {
@@ -1161,10 +1244,9 @@ public class AmqpChannel {
             // Check if we've received the complete message
             long receivedSize = currentPublishContext.bodyBuffer != null ?
                                currentPublishContext.bodyBuffer.readableBytes() : 0;
-            long expectedSize = currentPublishContext.expectedBodySize;
 
             logger.debug("Received content body: size={}, total={}/{}",
-                        payload.readableBytes(), receivedSize, expectedSize);
+                        incomingSize, receivedSize, expectedSize);
 
             if (receivedSize >= expectedSize) {
                 // Message complete - publish it
@@ -1240,12 +1322,15 @@ public class AmqpChannel {
     }
     
     public void close() {
-        // Synchronize on connection to prevent race with message delivery
-        synchronized (connection) {
-            open.set(false);
+        // Atomically mark as closed FIRST to prevent new operations
+        if (!open.compareAndSet(true, false)) {
+            return; // Already closed or closing
+        }
 
+        // Now synchronize for cleanup operations
+        synchronized (connection) {
             // Cancel all consumers on this channel FIRST
-            // This prevents deliveries to a closed channel
+            // This prevents new deliveries to a closed channel
             broker.cancelConsumersForChannel(connection, channelNumber);
             consumers.clear();
 

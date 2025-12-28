@@ -203,47 +203,40 @@ public class MessageDeliveryService {
                     }
                 }
 
-                Message message = queue.dequeue();
-                if (message == null) {
-                    break; // Queue empty
-                }
-
-                // Check if message has expired
-                if (message.isExpired()) {
-                    logger.debug("Message expired, discarding: id={}, ttl={}, absoluteExpiry={}",
-                            message.getMessageId(), message.getTtl(), message.getAbsoluteExpiryTime());
-                    continue; // Skip expired message, don't re-queue
-                }
-
-                try {
-                    long tag = deliveryTag.incrementAndGet();
-                    logger.debug("Delivering message to consumer: {}, tag: {}", consumer.getConsumerTag(), tag);
-                    deliverMessage(consumer, message, tag);
-                } catch (Exception e) {
-                    logger.error("Failed to deliver message to consumer: {}", consumer.getConsumerTag(), e);
-                    // Re-queue the message
-                    queue.enqueue(message);
+                // Atomically dequeue and deliver to prevent race conditions
+                // The actual dequeue happens inside synchronized block in deliverMessage
+                long tag = deliveryTag.incrementAndGet();
+                boolean delivered = tryDeliverMessage(consumer, tag);
+                if (!delivered) {
+                    // No more messages or delivery failed - check queue state
+                    if (queue.size() == 0) {
+                        break; // Queue empty, stop trying
+                    }
+                    // Otherwise, try next consumer
                 }
             }
         }
 
-        private void deliverMessage(ConsumerManager.Consumer consumer, Message message, long workerDeliveryTag) {
+        /**
+         * Attempts to dequeue and deliver a message atomically.
+         * Returns true if a message was successfully delivered, false otherwise.
+         */
+        private boolean tryDeliverMessage(ConsumerManager.Consumer consumer, long workerDeliveryTag) {
             // Get the connection for this specific consumer
             AmqpConnection consumerConnection = (AmqpConnection) consumer.getConnection();
             if (consumerConnection == null) {
                 logger.warn("Connection not found for consumer: {}", consumer.getConsumerTag());
-                queue.enqueue(message);
-                return;
+                return false;
             }
 
             // Verify channel is still open before delivery
             com.amqp.connection.AmqpChannel channel = consumerConnection.getChannel(consumer.getChannelNumber());
             if (channel == null || !channel.isOpen()) {
-                logger.warn("Channel closed for consumer: {}, requeuing message", consumer.getConsumerTag());
-                queue.enqueue(message);
-                return;
+                logger.warn("Channel closed for consumer: {}", consumer.getConsumerTag());
+                return false;
             }
 
+            Message message = null;
             try {
                 // Synchronize on the connection to prevent frame interleaving
                 // Each message must be sent atomically: METHOD → HEADER → BODY
@@ -251,10 +244,25 @@ public class MessageDeliveryService {
                     // Double-check consumer is still active and channel is open
                     // This check is done inside the lock to prevent race with channel close
                     if (!consumer.isActive() || !channel.isOpen()) {
-                        logger.debug("Consumer {} cancelled or channel closed during delivery, requeuing",
+                        logger.debug("Consumer {} cancelled or channel closed during delivery",
                                    consumer.getConsumerTag());
-                        queue.enqueue(message);
-                        return;
+                        return false;
+                    }
+
+                    // CRITICAL: Dequeue INSIDE the synchronized block
+                    // This ensures we only remove the message when we can definitely deliver it
+                    message = queue.dequeue();
+                    if (message == null) {
+                        return false; // Queue empty
+                    }
+
+                    // Check if message has expired
+                    if (message.isExpired()) {
+                        logger.debug("Message expired, discarding: id={}, ttl={}, absoluteExpiry={}",
+                                message.getMessageId(), message.getTtl(), message.getAbsoluteExpiryTime());
+                        // Don't re-queue expired messages, but continue trying
+                        // We need to return true to indicate we processed something
+                        return true;
                     }
 
                     // Track delivery in the channel if not in noAck mode
@@ -266,30 +274,57 @@ public class MessageDeliveryService {
                         );
                     }
 
-                    // Build Basic.Deliver frame
-                    ByteBuf deliverPayload = Unpooled.buffer();
+                    // Now deliver the message (still inside sync block)
+                    deliverMessageContent(consumer, consumerConnection, message, channelDeliveryTag);
 
-                    // Basic.Deliver method: class=60, method=60
-                    AmqpCodec.encodeShortString(deliverPayload, consumer.getConsumerTag());
-                    deliverPayload.writeLong(channelDeliveryTag); // Use channel's delivery tag
-                    AmqpCodec.encodeBoolean(deliverPayload, false); // redelivered
-                    AmqpCodec.encodeShortString(deliverPayload, ""); // exchange (not stored in message)
-                    AmqpCodec.encodeShortString(deliverPayload, message.getRoutingKey() != null ? message.getRoutingKey() : "");
+                    logger.debug("Message delivered to consumer: {}, deliveryTag: {}",
+                               consumer.getConsumerTag(), channelDeliveryTag);
+                    return true;
+                } // End synchronized
+            } catch (Exception e) {
+                logger.error("Exception while delivering message to consumer: {}", consumer.getConsumerTag(), e);
+                // Re-queue the message if we dequeued it
+                if (message != null) {
+                    queue.enqueue(message);
+                }
+                return false;
+            }
+        }
 
-                    consumerConnection.sendMethod(consumer.getChannelNumber(), (short) 60, (short) 60, deliverPayload);
+        /**
+         * Delivers message content to consumer. Called from inside synchronized block.
+         * Does not handle re-queueing - caller is responsible for that.
+         */
+        private void deliverMessageContent(ConsumerManager.Consumer consumer,
+                                           AmqpConnection consumerConnection,
+                                           Message message,
+                                           long channelDeliveryTag) {
+            // Build Basic.Deliver frame
+            ByteBuf deliverPayload = Unpooled.buffer();
+
+            // Basic.Deliver method: class=60, method=60
+            AmqpCodec.encodeShortString(deliverPayload, consumer.getConsumerTag());
+            deliverPayload.writeLong(channelDeliveryTag);
+            AmqpCodec.encodeBoolean(deliverPayload, false); // redelivered
+            AmqpCodec.encodeShortString(deliverPayload, ""); // exchange (not stored in message)
+            AmqpCodec.encodeShortString(deliverPayload, message.getRoutingKey() != null ? message.getRoutingKey() : "");
+
+            consumerConnection.sendMethod(consumer.getChannelNumber(), (short) 60, (short) 60, deliverPayload);
 
             // Send Content Header
             long bodySize = message.getBody() != null ? message.getBody().length : 0;
             ByteBuf headerPayload = Unpooled.buffer();
 
-            // Property flags (simplified - would normally encode all properties)
+            // Property flags
             short propertyFlags = 0;
             Short deliveryMode = message.getDeliveryMode();
             Short priority = message.getPriority();
             Long timestamp = message.getTimestamp();
+            java.util.Map<String, Object> headers = message.getHeaders();
 
             if (message.getContentType() != null) propertyFlags |= (1 << 15);
             if (message.getContentEncoding() != null) propertyFlags |= (1 << 14);
+            if (headers != null && !headers.isEmpty()) propertyFlags |= (1 << 13);
             if (deliveryMode != null) propertyFlags |= (1 << 12);
             if (priority != null) propertyFlags |= (1 << 11);
             if (message.getCorrelationId() != null) propertyFlags |= (1 << 10);
@@ -309,6 +344,9 @@ public class MessageDeliveryService {
             }
             if (message.getContentEncoding() != null) {
                 AmqpCodec.encodeShortString(headerPayload, message.getContentEncoding());
+            }
+            if (headers != null && !headers.isEmpty()) {
+                AmqpCodec.encodeTable(headerPayload, headers);
             }
             if (deliveryMode != null) {
                 headerPayload.writeByte(deliveryMode);
@@ -347,15 +385,6 @@ public class MessageDeliveryService {
             if (message.getBody() != null && message.getBody().length > 0) {
                 ByteBuf bodyBuf = Unpooled.wrappedBuffer(message.getBody());
                 consumerConnection.sendContentBody(consumer.getChannelNumber(), bodyBuf);
-            }
-
-            logger.debug("Message delivered to consumer: {}, deliveryTag: {}",
-                       consumer.getConsumerTag(), channelDeliveryTag);
-                } // End synchronized
-            } catch (Exception e) {
-                logger.error("Exception while delivering message to consumer: {}", consumer.getConsumerTag(), e);
-                // Re-queue the message
-                queue.enqueue(message);
             }
         }
     }

@@ -113,3 +113,5 @@ application.log*
 *.html
 surefire-reports/
 failsafe-reports/
+nul
+test-results/

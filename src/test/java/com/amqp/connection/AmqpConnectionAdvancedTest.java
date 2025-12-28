@@ -52,11 +52,22 @@ class AmqpConnectionAdvancedTest {
     class ChannelLimitTests {
 
         @Test
-        @DisplayName("Should handle maximum channel number")
+        @DisplayName("Should handle channel within negotiated limit")
         void testMaximumChannelNumber() {
+            // Default channel-max is 2047, so channels up to that should work
             assertThatCode(() ->
-                connection.openChannel(Short.MAX_VALUE)
+                connection.openChannel((short) 2000)
             ).doesNotThrowAnyException();
+        }
+
+        @Test
+        @DisplayName("Should reject channel exceeding channel-max limit")
+        void testChannelExceedsLimit() {
+            // Short.MAX_VALUE (32767) exceeds default channel-max of 2047
+            assertThatThrownBy(() ->
+                connection.openChannel(Short.MAX_VALUE)
+            ).isInstanceOf(IllegalArgumentException.class)
+             .hasMessageContaining("exceeds channel-max limit");
         }
 
         @Test

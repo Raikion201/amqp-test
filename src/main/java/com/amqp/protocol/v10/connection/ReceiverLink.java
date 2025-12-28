@@ -30,16 +30,26 @@ public class ReceiverLink extends Amqp10Link {
     // Partial transfer being assembled (for multi-frame messages)
     private ReceiverDelivery currentDelivery;
 
+    // Last completed delivery (for multi-frame messages)
+    private ReceiverDelivery lastCompletedDelivery;
+
     // Message handler
     private Consumer<ReceiverDelivery> messageHandler;
 
-    // Prefetch credit
-    private long prefetchCredit = 100;
+    // Prefetch credit - configurable
+    public static final long DEFAULT_PREFETCH_CREDIT = 100;
+    private long prefetchCredit = DEFAULT_PREFETCH_CREDIT;
 
-    // Security limits
-    private long maxMessageSize = 64 * 1024 * 1024; // 64 MB default
-    private long maxAssemblyTimeMs = 30000; // 30 seconds default
+    // Security limits - configurable
+    public static final long DEFAULT_MAX_MESSAGE_SIZE = 64 * 1024 * 1024; // 64 MB default
+    public static final long DEFAULT_MAX_ASSEMBLY_TIME_MS = 30000; // 30 seconds default
+
+    private long maxMessageSize = DEFAULT_MAX_MESSAGE_SIZE;
+    private long maxAssemblyTimeMs = DEFAULT_MAX_ASSEMBLY_TIME_MS;
     private long currentDeliveryStartTime;
+
+    // Sender's delivery count (updated from Flow)
+    private long senderDeliveryCount = 0;
 
     public ReceiverLink(Amqp10Session session, String name, long handle,
                         Source source, Target target) {
@@ -123,9 +133,14 @@ public class ReceiverLink extends Amqp10Link {
                 unsettled.put(currentDelivery.getDeliveryId(), currentDelivery);
             }
 
-            // Update delivery count
-            deliveryCount++;
-            linkCredit--;
+            // Update link credit (decrease available credit)
+            // Note: deliveryCount is maintained by sender, we track senderDeliveryCount from Flow
+            if (linkCredit > 0) {
+                linkCredit--;
+            }
+
+            // Store as last completed delivery before clearing (for multi-frame message access)
+            lastCompletedDelivery = currentDelivery;
 
             // Deliver to handler
             if (messageHandler != null) {
@@ -140,6 +155,24 @@ public class ReceiverLink extends Amqp10Link {
         }
 
         return null;
+    }
+
+    /**
+     * Override to track sender's delivery count from flow.
+     */
+    @Override
+    public void onFlowReceived(Flow flow) {
+        super.onFlowReceived(flow);
+        if (flow.getDeliveryCount() != null) {
+            this.senderDeliveryCount = flow.getDeliveryCount();
+        }
+    }
+
+    /**
+     * Get the sender's delivery count as reported in Flow.
+     */
+    public long getSenderDeliveryCount() {
+        return senderDeliveryCount;
     }
 
     /**
@@ -286,6 +319,51 @@ public class ReceiverLink extends Amqp10Link {
      */
     public boolean hasPartialDelivery() {
         return currentDelivery != null;
+    }
+
+    /**
+     * Get the last completed delivery.
+     * This is used for multi-frame messages to get the complete assembled message.
+     */
+    public ReceiverDelivery getLastCompletedDelivery() {
+        return lastCompletedDelivery;
+    }
+
+    /**
+     * Cleanup all resources when link is closed.
+     * CRITICAL: Must be called on link close to prevent ByteBuf leaks!
+     */
+    public void cleanup() {
+        // Release partial delivery if any
+        if (currentDelivery != null) {
+            try {
+                log.debug("Releasing partial delivery {} on link cleanup", currentDelivery.getDeliveryId());
+                currentDelivery.release();
+            } catch (Exception e) {
+                log.warn("Error releasing partial delivery during cleanup", e);
+            }
+            currentDelivery = null;
+        }
+
+        // Release all unsettled deliveries
+        for (ReceiverDelivery delivery : unsettled.values()) {
+            try {
+                delivery.release();
+            } catch (Exception e) {
+                log.warn("Error releasing unsettled delivery {} during cleanup", delivery.getDeliveryId(), e);
+            }
+        }
+        unsettled.clear();
+        log.debug("ReceiverLink {} cleaned up", name);
+    }
+
+    /**
+     * Close the link with proper resource cleanup.
+     */
+    @Override
+    public void close(ErrorCondition error) {
+        cleanup();
+        super.close(error);
     }
 
     /**

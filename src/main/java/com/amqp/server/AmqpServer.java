@@ -16,27 +16,41 @@ import org.slf4j.LoggerFactory;
 
 import javax.net.ssl.SSLException;
 import java.io.File;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class AmqpServer {
     private static final Logger logger = LoggerFactory.getLogger(AmqpServer.class);
+
+    // Connection limit constants
+    private static final int DEFAULT_MAX_CONNECTIONS = 10000;
+    private static final int GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 15;
 
     private final int port;
     private final AmqpBroker broker;
     private final boolean sslEnabled;
     private final SslContext sslContext;
+    private final int maxConnections;
+    private final AtomicInteger activeConnections = new AtomicInteger(0);
     private Channel serverChannel;
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
 
     public AmqpServer(int port, AmqpBroker broker) {
-        this(port, broker, false, null, null);
+        this(port, broker, false, null, null, DEFAULT_MAX_CONNECTIONS);
     }
 
     public AmqpServer(int port, AmqpBroker broker, boolean sslEnabled,
                      String certPath, String keyPath) {
+        this(port, broker, sslEnabled, certPath, keyPath, DEFAULT_MAX_CONNECTIONS);
+    }
+
+    public AmqpServer(int port, AmqpBroker broker, boolean sslEnabled,
+                     String certPath, String keyPath, int maxConnections) {
         this.port = port;
         this.broker = broker;
         this.sslEnabled = sslEnabled;
+        this.maxConnections = maxConnections;
 
         // Initialize SSL if enabled
         if (sslEnabled && certPath != null && keyPath != null) {
@@ -69,6 +83,27 @@ public class AmqpServer {
              .childHandler(new ChannelInitializer<SocketChannel>() {
                  @Override
                  public void initChannel(SocketChannel ch) throws Exception {
+                     // Check connection limit BEFORE adding handlers
+                     int currentConnections = activeConnections.get();
+                     if (currentConnections >= maxConnections) {
+                         logger.warn("SECURITY: Connection rejected from {}: max connections ({}) exceeded",
+                                 ch.remoteAddress(), maxConnections);
+                         ch.close();
+                         return;
+                     }
+
+                     // Track active connection
+                     activeConnections.incrementAndGet();
+                     logger.debug("New connection from {}, active connections: {}",
+                             ch.remoteAddress(), activeConnections.get());
+
+                     // Decrement counter when connection closes
+                     ch.closeFuture().addListener(future -> {
+                         int remaining = activeConnections.decrementAndGet();
+                         logger.debug("Connection closed from {}, active connections: {}",
+                                 ch.remoteAddress(), remaining);
+                     });
+
                      ChannelPipeline pipeline = ch.pipeline();
 
                      // Add SSL handler if enabled
@@ -97,16 +132,54 @@ public class AmqpServer {
     }
     
     public void stop() {
+        logger.info("Stopping AMQP Server gracefully...");
+
+        // Stop accepting new connections first
+        if (serverChannel != null && serverChannel.isOpen()) {
+            try {
+                serverChannel.close().sync();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                logger.warn("Interrupted while closing server channel");
+            }
+        }
+
+        // Stop broker (allows in-flight messages to complete)
         broker.stop();
-        if (serverChannel != null) {
-            serverChannel.close();
+
+        // Shutdown event loops with proper timeout
+        if (bossGroup != null && !bossGroup.isShutdown()) {
+            try {
+                bossGroup.shutdownGracefully(1, GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS).sync();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                logger.warn("Boss group shutdown interrupted");
+            }
         }
-        if (bossGroup != null) {
-            bossGroup.shutdownGracefully();
+
+        if (workerGroup != null && !workerGroup.isShutdown()) {
+            try {
+                workerGroup.shutdownGracefully(1, GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS).sync();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                logger.warn("Worker group shutdown interrupted");
+            }
         }
-        if (workerGroup != null) {
-            workerGroup.shutdownGracefully();
-        }
-        logger.info("AMQP Server stopped");
+
+        logger.info("AMQP Server stopped (final active connections: {})", activeConnections.get());
+    }
+
+    /**
+     * Get the current number of active connections.
+     */
+    public int getActiveConnectionCount() {
+        return activeConnections.get();
+    }
+
+    /**
+     * Get the maximum allowed connections.
+     */
+    public int getMaxConnections() {
+        return maxConnections;
     }
 }

@@ -269,8 +269,25 @@ public class AmqpBroker {
             exchange.removeAllBindingsToQueue(queueName);
         }
 
-        // Remove consumers
-        consumerManager.removeConsumersForQueue(queueName);
+        // Cancel consumers and notify them with Basic.Cancel
+        consumerManager.cancelConsumersForQueue(queueName, (consumer, reason) -> {
+            try {
+                // Send Basic.Cancel to the consumer's connection/channel
+                Object conn = consumer.getConnection();
+                if (conn instanceof com.amqp.connection.AmqpConnection) {
+                    com.amqp.connection.AmqpConnection amqpConn = (com.amqp.connection.AmqpConnection) conn;
+                    io.netty.buffer.ByteBuf cancelPayload = io.netty.buffer.Unpooled.buffer();
+                    com.amqp.amqp.AmqpCodec.encodeShortString(cancelPayload, consumer.getConsumerTag());
+                    cancelPayload.writeByte(1); // no-wait = true (we don't expect Cancel-Ok from client)
+                    amqpConn.sendMethod(consumer.getChannelNumber(),
+                            com.amqp.amqp.AmqpConstants.CLASS_BASIC,
+                            com.amqp.amqp.AmqpConstants.METHOD_BASIC_CANCEL, cancelPayload);
+                    logger.debug("Sent Basic.Cancel to consumer {} for queue deletion", consumer.getConsumerTag());
+                }
+            } catch (Exception e) {
+                logger.warn("Failed to send Basic.Cancel to consumer {}: {}", consumer.getConsumerTag(), e.getMessage());
+            }
+        });
 
         // Remove the queue from vhost
         vhost.removeQueue(queueName);

@@ -312,8 +312,14 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.1.2</version>
                 <configuration>
-                    <!-- Skip unit tests - run compliance tests only -->
-                    <skipTests>true</skipTests>
+                    <!-- Run unit tests -->
+                    <skipTests>false</skipTests>
+                    <!-- JVM arguments for Mockito ByteBuddy compatibility with Java 17+ -->
+                    <argLine>
+                        --add-opens java.base/java.lang=ALL-UNNAMED
+                        --add-opens java.base/java.lang.reflect=ALL-UNNAMED
+                        --add-opens java.base/java.util=ALL-UNNAMED
+                    </argLine>
                 </configuration>
             </plugin>
 

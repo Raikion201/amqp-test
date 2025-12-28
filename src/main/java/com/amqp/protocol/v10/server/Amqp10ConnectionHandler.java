@@ -217,7 +217,7 @@ public class Amqp10ConnectionHandler extends ChannelInboundHandlerAdapter {
     private void handleAttach(ChannelHandlerContext ctx, int channel, Attach attach) {
         log.debug("Received Attach for link '{}' on channel {}", attach.getName(), channel);
 
-        Amqp10Session session = connection.getSession(channel);
+        Amqp10Session session = getSessionByRemoteChannel(channel);
         if (session == null) {
             log.error("No session for channel {}", channel);
             return;
@@ -240,6 +240,9 @@ public class Amqp10ConnectionHandler extends ChannelInboundHandlerAdapter {
 
         link.onAttachReceived(attach);
 
+        // Store remote handle mapping for this link
+        session.mapRemoteHandle(attach.getHandle(), link.getHandle());
+
         // Set up broker integration
         brokerAdapter.onLinkAttached(session, link);
 
@@ -261,7 +264,7 @@ public class Amqp10ConnectionHandler extends ChannelInboundHandlerAdapter {
     private void handleFlow(ChannelHandlerContext ctx, int channel, Flow flow) {
         log.debug("Received Flow on channel {}", channel);
 
-        Amqp10Session session = connection.getSession(channel);
+        Amqp10Session session = getSessionByRemoteChannel(channel);
         if (session == null) {
             return;
         }
@@ -272,7 +275,7 @@ public class Amqp10ConnectionHandler extends ChannelInboundHandlerAdapter {
         if (flow.isEcho()) {
             Flow response = session.createFlow();
             if (flow.getHandle() != null) {
-                Amqp10Link link = session.getLink(flow.getHandle());
+                Amqp10Link link = session.getLinkByRemoteHandle(flow.getHandle());
                 if (link != null) {
                     response = link.createFlow();
                 }
@@ -282,7 +285,7 @@ public class Amqp10ConnectionHandler extends ChannelInboundHandlerAdapter {
 
         // Trigger message delivery if sender got credit
         if (flow.isLinkFlow() && flow.getLinkCredit() != null) {
-            Amqp10Link link = session.getLink(flow.getHandle());
+            Amqp10Link link = session.getLinkByRemoteHandle(flow.getHandle());
             if (link != null && link.isSender()) {
                 brokerAdapter.onCreditAvailable(session, (SenderLink) link);
             }
@@ -293,12 +296,13 @@ public class Amqp10ConnectionHandler extends ChannelInboundHandlerAdapter {
                                  Transfer transfer, ByteBuf payload) {
         log.debug("Received Transfer on channel {}, handle {}", channel, transfer.getHandle());
 
-        Amqp10Session session = connection.getSession(channel);
+        Amqp10Session session = getSessionByRemoteChannel(channel);
         if (session == null) {
+            log.warn("Transfer received for unknown session channel: {}", channel);
             return;
         }
 
-        Amqp10Link link = session.getLink(transfer.getHandle());
+        Amqp10Link link = session.getLinkByRemoteHandle(transfer.getHandle());
         if (link == null || !link.isReceiver()) {
             log.warn("Transfer for unknown/invalid link: {}", transfer.getHandle());
             return;
@@ -306,28 +310,59 @@ public class Amqp10ConnectionHandler extends ChannelInboundHandlerAdapter {
 
         ReceiverLink receiver = (ReceiverLink) link;
 
-        // Set payload on transfer
-        if (payload.isReadable()) {
-            transfer.setPayload(payload.retainedSlice());
+        // Store payload on Transfer so BrokerAdapter can access it for message decoding
+        if (payload != null && payload.isReadable()) {
+            transfer.setPayload(payload);
         }
 
-        // Handle the transfer
-        receiver.onTransfer(transfer, transfer.getPayload());
+        try {
+            // Pass payload - ReceiverLink.onTransfer will retain what it needs
+            // The payload is owned by the frame and will be released after this method
+            ErrorCondition error = receiver.onTransfer(transfer, payload);
+            if (error != null) {
+                log.warn("Transfer rejected: {}", error.getDescription());
+                // Send rejection disposition
+                Disposition disp = receiver.createDisposition(
+                    transfer.getDeliveryId() != null ? transfer.getDeliveryId() : 0,
+                    new com.amqp.protocol.v10.delivery.Rejected().setError(error),
+                    true);
+                sendPerformative(ctx, session.getLocalChannel(), disp);
+                return;
+            }
 
-        // Process the message through broker
-        if (!transfer.hasMore()) {
-            ReceiverLink.ReceiverDelivery delivery = null;
-            // The delivery is tracked in the link
-            // BrokerAdapter will handle the message
-            brokerAdapter.onMessageReceived(session, receiver, transfer);
+            // Process the message through broker when complete
+            if (!transfer.hasMore()) {
+                // Get the complete assembled delivery from ReceiverLink
+                ReceiverLink.ReceiverDelivery completedDelivery = receiver.getLastCompletedDelivery();
+                if (completedDelivery != null && completedDelivery.getMessage() != null) {
+                    brokerAdapter.onMessageReceived(session, receiver, transfer, completedDelivery);
+                } else {
+                    // Fallback for single-frame messages where message is on transfer payload
+                    brokerAdapter.onMessageReceived(session, receiver, transfer, null);
+                }
+            }
+        } catch (Exception e) {
+            log.error("Error processing transfer on channel {}, handle {}", channel, transfer.getHandle(), e);
         }
+    }
+
+    /**
+     * Find session by remote channel number.
+     */
+    private Amqp10Session getSessionByRemoteChannel(int remoteChannel) {
+        for (Amqp10Session session : connection.getSessions().values()) {
+            if (session.getRemoteChannel() != null && session.getRemoteChannel() == remoteChannel) {
+                return session;
+            }
+        }
+        return null;
     }
 
     private void handleDisposition(ChannelHandlerContext ctx, int channel,
                                     Disposition disposition) {
         log.debug("Received Disposition on channel {}", channel);
 
-        Amqp10Session session = connection.getSession(channel);
+        Amqp10Session session = getSessionByRemoteChannel(channel);
         if (session == null) {
             return;
         }
@@ -361,15 +396,18 @@ public class Amqp10ConnectionHandler extends ChannelInboundHandlerAdapter {
     private void handleDetach(ChannelHandlerContext ctx, int channel, Detach detach) {
         log.debug("Received Detach on channel {}, handle {}", channel, detach.getHandle());
 
-        Amqp10Session session = connection.getSession(channel);
+        Amqp10Session session = getSessionByRemoteChannel(channel);
         if (session == null) {
             return;
         }
 
-        Amqp10Link link = session.getLink(detach.getHandle());
+        Amqp10Link link = session.getLinkByRemoteHandle(detach.getHandle());
         if (link == null) {
             return;
         }
+
+        // Clean up remote handle mapping
+        session.unmapRemoteHandle(detach.getHandle());
 
         link.onDetachReceived(detach);
 
@@ -387,10 +425,13 @@ public class Amqp10ConnectionHandler extends ChannelInboundHandlerAdapter {
     private void handleEnd(ChannelHandlerContext ctx, int channel, End end) {
         log.debug("Received End on channel {}", channel);
 
-        Amqp10Session session = connection.getSession(channel);
+        Amqp10Session session = getSessionByRemoteChannel(channel);
         if (session == null) {
             return;
         }
+
+        // Clean up all links before ending session
+        session.closeAllLinks();
 
         session.onEndReceived(end);
 
@@ -465,8 +506,37 @@ public class Amqp10ConnectionHandler extends ChannelInboundHandlerAdapter {
                     ctx.alloc().buffer(0));
             ctx.writeAndFlush(heartbeat);
             log.trace("Sent heartbeat");
+
+            // Check for partial delivery timeouts on all receiver links
+            checkPartialDeliveryTimeouts(ctx);
         }
         super.userEventTriggered(ctx, evt);
+    }
+
+    /**
+     * Check for timed-out partial deliveries across all sessions and receiver links.
+     */
+    private void checkPartialDeliveryTimeouts(ChannelHandlerContext ctx) {
+        if (connection == null) {
+            return;
+        }
+
+        for (Amqp10Session session : connection.getSessions().values()) {
+            for (Amqp10Link link : session.getLinks().values()) {
+                if (link.isReceiver() && link instanceof ReceiverLink) {
+                    ReceiverLink receiver = (ReceiverLink) link;
+                    ErrorCondition error = receiver.checkPartialDeliveryTimeout();
+                    if (error != null) {
+                        log.warn("Partial delivery timeout on link '{}': {}",
+                                link.getName(), error.getDescription());
+                        // Send detach with error
+                        Detach detach = link.createDetach(false, error);
+                        sendPerformative(ctx, session.getLocalChannel(), detach);
+                        link.onDetachSent();
+                    }
+                }
+            }
+        }
     }
 
     @Override

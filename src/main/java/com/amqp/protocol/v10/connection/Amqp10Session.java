@@ -43,6 +43,7 @@ public class Amqp10Session {
     // Links indexed by handle
     private final Map<Long, Amqp10Link> links = new ConcurrentHashMap<>();
     private final Map<String, Amqp10Link> linksByName = new ConcurrentHashMap<>();
+    private final Map<Long, Long> remoteToLocalHandle = new ConcurrentHashMap<>();
     private final AtomicLong nextHandle = new AtomicLong(0);
 
     // Unsettled deliveries
@@ -81,7 +82,11 @@ public class Amqp10Session {
 
     // Begin handling
     public void onBeginReceived(Begin begin) {
-        this.remoteChannel = begin.getRemoteChannel();
+        // Only update remoteChannel from begin if it's provided (response to our Begin)
+        // If null, the remoteChannel was already set from the incoming frame's channel
+        if (begin.getRemoteChannel() != null) {
+            this.remoteChannel = begin.getRemoteChannel();
+        }
 
         // Negotiate windows
         this.nextIncomingId = begin.getNextOutgoingId();
@@ -201,6 +206,32 @@ public class Amqp10Session {
         return links.get(handle);
     }
 
+    /**
+     * Get link by remote handle (maps remote handle to local handle first).
+     */
+    public Amqp10Link getLinkByRemoteHandle(long remoteHandle) {
+        Long localHandle = remoteToLocalHandle.get(remoteHandle);
+        if (localHandle != null) {
+            return links.get(localHandle);
+        }
+        // Fallback: try direct lookup (backwards compatibility)
+        return links.get(remoteHandle);
+    }
+
+    /**
+     * Map a remote handle to a local handle.
+     */
+    public void mapRemoteHandle(long remoteHandle, long localHandle) {
+        remoteToLocalHandle.put(remoteHandle, localHandle);
+    }
+
+    /**
+     * Remove remote handle mapping.
+     */
+    public void unmapRemoteHandle(long remoteHandle) {
+        remoteToLocalHandle.remove(remoteHandle);
+    }
+
     public Amqp10Link getLinkByName(String name) {
         return linksByName.get(name);
     }
@@ -218,10 +249,15 @@ public class Amqp10Session {
 
     public void closeAllLinks() {
         for (Amqp10Link link : links.values()) {
+            // Ensure proper cleanup for receiver links (releases ByteBufs)
+            if (link instanceof ReceiverLink) {
+                ((ReceiverLink) link).cleanup();
+            }
             link.close(null);
         }
         links.clear();
         linksByName.clear();
+        remoteToLocalHandle.clear();
     }
 
     // Delivery management
@@ -315,17 +351,46 @@ public class Amqp10Session {
         return nextOutgoingId.get();
     }
 
+    /**
+     * Allocate an outgoing transfer ID if capacity is available.
+     * @return the transfer ID, or -1 if no capacity
+     */
     public long allocateOutgoingId() {
+        if (outgoingWindow <= 0) {
+            return -1; // No capacity
+        }
+        outgoingWindow--;
         return nextOutgoingId.getAndIncrement();
+    }
+
+    /**
+     * Release an outgoing ID if transfer couldn't be completed.
+     */
+    public void releaseOutgoingId() {
+        outgoingWindow++;
     }
 
     public void updateIncomingId(long transferId) {
         this.nextIncomingId = transferId + 1;
-        this.incomingWindow--;
+        if (incomingWindow > 0) {
+            incomingWindow--;
+        }
     }
 
     public boolean hasOutgoingCapacity() {
         return outgoingWindow > 0;
+    }
+
+    /**
+     * Replenish incoming window and return a Flow if needed.
+     */
+    public Flow replenishIncomingWindow() {
+        long replenishThreshold = DEFAULT_INCOMING_WINDOW / 2;
+        if (incomingWindow < replenishThreshold) {
+            incomingWindow = DEFAULT_INCOMING_WINDOW;
+            return createFlow();
+        }
+        return null;
     }
 
     // Getters

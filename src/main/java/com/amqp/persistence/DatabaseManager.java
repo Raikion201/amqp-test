@@ -109,23 +109,38 @@ public class DatabaseManager {
                 )
                 """);
             
+            // Composite indexes including vhost for multi-tenant queries
             stmt.execute("""
-                CREATE INDEX IF NOT EXISTS idx_messages_queue_name ON messages(queue_name)
+                CREATE INDEX IF NOT EXISTS idx_messages_vhost_queue ON messages(vhost, queue_name)
                 """);
-            
+
             stmt.execute("""
                 CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at)
                 """);
-            
+
             stmt.execute("""
-                CREATE INDEX IF NOT EXISTS idx_bindings_exchange ON bindings(exchange_name)
+                CREATE INDEX IF NOT EXISTS idx_bindings_vhost_exchange ON bindings(vhost, exchange_name)
                 """);
-            
+
             stmt.execute("""
-                CREATE INDEX IF NOT EXISTS idx_bindings_queue ON bindings(queue_name)
+                CREATE INDEX IF NOT EXISTS idx_bindings_vhost_queue ON bindings(vhost, queue_name)
                 """);
-            
-            logger.info("Database schema initialized");
+
+            // Indexes for exchange and queue lookups by vhost
+            stmt.execute("""
+                CREATE INDEX IF NOT EXISTS idx_exchanges_vhost ON exchanges(vhost)
+                """);
+
+            stmt.execute("""
+                CREATE INDEX IF NOT EXISTS idx_queues_vhost ON queues(vhost)
+                """);
+
+            // Index for message expiration queries (standard index, compatible with H2 and PostgreSQL)
+            stmt.execute("""
+                CREATE INDEX IF NOT EXISTS idx_messages_expiration ON messages(expiration)
+                """);
+
+            logger.info("Database schema initialized with vhost-aware indexes");
             
         } catch (SQLException e) {
             logger.error("Failed to initialize database schema", e);

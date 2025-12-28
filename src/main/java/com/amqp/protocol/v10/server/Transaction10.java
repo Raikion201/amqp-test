@@ -37,9 +37,13 @@ public class Transaction10 {
     private final String txnIdString;
     private volatile State state = State.DECLARED;
 
-    // Tracked operations
+    // Tracked operations (synchronized access via stateLock)
     private final List<TransactionalDelivery> publishedMessages = new ArrayList<>();
     private final List<TransactionalAck> acknowledgments = new ArrayList<>();
+
+    // Copy for safe iteration during commit/rollback
+    private volatile List<TransactionalDelivery> publishedMessagesCopy;
+    private volatile List<TransactionalAck> acknowledgmentsCopy;
 
     // Session association
     private final Object session;
@@ -185,15 +189,18 @@ public class Transaction10 {
      * Add a published message to this transaction.
      */
     public void addPublish(Delivery delivery, String address, byte[] messageData) {
-        if (state != State.DECLARED) {
-            throw new IllegalStateException("Transaction not active: " + state);
+        synchronized (stateLock) {
+            if (state != State.DECLARED) {
+                throw new IllegalStateException("Transaction not active: " + state);
+            }
+            if (isTimedOut()) {
+                // Don't call rollbackIfTimedOut() here - it would deadlock
+                state = State.ROLLEDBACK;
+                throw new IllegalStateException("Transaction timed out: " + txnIdString);
+            }
+            touch();
+            publishedMessages.add(new TransactionalDelivery(delivery, address, messageData));
         }
-        if (isTimedOut()) {
-            rollbackIfTimedOut();
-            throw new IllegalStateException("Transaction timed out: " + txnIdString);
-        }
-        touch();
-        publishedMessages.add(new TransactionalDelivery(delivery, address, messageData));
         log.debug("Transaction {} added publish to {}", txnIdString, address);
     }
 
@@ -201,81 +208,139 @@ public class Transaction10 {
      * Add an acknowledgment to this transaction.
      */
     public void addAcknowledgment(Delivery delivery, long deliveryId) {
-        if (state != State.DECLARED) {
-            throw new IllegalStateException("Transaction not active: " + state);
+        synchronized (stateLock) {
+            if (state != State.DECLARED) {
+                throw new IllegalStateException("Transaction not active: " + state);
+            }
+            if (isTimedOut()) {
+                // Don't call rollbackIfTimedOut() here - it would deadlock
+                state = State.ROLLEDBACK;
+                throw new IllegalStateException("Transaction timed out: " + txnIdString);
+            }
+            touch();
+            acknowledgments.add(new TransactionalAck(delivery, deliveryId));
         }
-        if (isTimedOut()) {
-            rollbackIfTimedOut();
-            throw new IllegalStateException("Transaction timed out: " + txnIdString);
-        }
-        touch();
-        acknowledgments.add(new TransactionalAck(delivery, deliveryId));
         log.debug("Transaction {} added ack for delivery {}", txnIdString, deliveryId);
     }
 
+    // Lock object for thread-safe state transitions
+    private final Object stateLock = new Object();
+
     /**
      * Commit the transaction.
+     * Thread-safe: copies lists under lock, then processes without lock.
      */
     public void commit() throws Exception {
-        if (state != State.DECLARED) {
-            throw new IllegalStateException("Transaction not in DECLARED state: " + state);
-        }
-        if (isTimedOut()) {
-            rollbackIfTimedOut();
-            throw new IllegalStateException("Transaction timed out before commit: " + txnIdString);
+        List<TransactionalDelivery> toCommitPublishes;
+        List<TransactionalAck> toCommitAcks;
+
+        synchronized (stateLock) {
+            if (state != State.DECLARED) {
+                throw new IllegalStateException("Transaction not in DECLARED state: " + state);
+            }
+            if (isTimedOut()) {
+                state = State.ROLLEDBACK;
+                throw new IllegalStateException("Transaction timed out before commit: " + txnIdString);
+            }
+
+            state = State.DISCHARGING;
+            // Copy lists under lock to prevent concurrent modification
+            toCommitPublishes = new ArrayList<>(publishedMessages);
+            toCommitAcks = new ArrayList<>(acknowledgments);
         }
 
-        state = State.DISCHARGING;
         log.debug("Committing transaction {}: {} publishes, {} acks",
-                txnIdString, publishedMessages.size(), acknowledgments.size());
+                txnIdString, toCommitPublishes.size(), toCommitAcks.size());
+
+        List<TransactionalDelivery> committedPublishes = new ArrayList<>();
+        List<TransactionalAck> committedAcks = new ArrayList<>();
 
         try {
             // First, make all published messages visible
-            for (TransactionalDelivery delivery : publishedMessages) {
+            for (TransactionalDelivery delivery : toCommitPublishes) {
                 delivery.commit();
+                committedPublishes.add(delivery);
             }
 
             // Then, finalize all acknowledgments
-            for (TransactionalAck ack : acknowledgments) {
+            for (TransactionalAck ack : toCommitAcks) {
                 ack.commit();
+                committedAcks.add(ack);
             }
 
-            state = State.COMMITTED;
+            synchronized (stateLock) {
+                state = State.COMMITTED;
+            }
             log.debug("Transaction {} committed successfully", txnIdString);
         } catch (Exception e) {
-            state = State.ROLLEDBACK;
-            log.error("Transaction {} commit failed, rolling back", txnIdString, e);
-            rollbackInternal();
+            synchronized (stateLock) {
+                state = State.ROLLEDBACK;
+            }
+            log.error("Transaction {} commit failed after {} publishes and {} acks, rolling back",
+                    txnIdString, committedPublishes.size(), committedAcks.size(), e);
+
+            // Rollback already committed operations in reverse order
+            for (int i = committedAcks.size() - 1; i >= 0; i--) {
+                try {
+                    committedAcks.get(i).rollback();
+                } catch (Exception re) {
+                    log.warn("Error rolling back ack during commit failure recovery", re);
+                }
+            }
+            for (int i = committedPublishes.size() - 1; i >= 0; i--) {
+                try {
+                    committedPublishes.get(i).rollback();
+                } catch (Exception re) {
+                    log.warn("Error rolling back publish during commit failure recovery", re);
+                }
+            }
             throw e;
         }
     }
 
     /**
      * Rollback the transaction.
+     * Thread-safe: copies lists under lock, then processes without lock.
      */
     public void rollback() {
-        if (state != State.DECLARED) {
-            if (state == State.ROLLEDBACK) {
-                return; // Already rolled back
+        List<TransactionalDelivery> toRollbackPublishes;
+        List<TransactionalAck> toRollbackAcks;
+
+        synchronized (stateLock) {
+            if (state != State.DECLARED) {
+                if (state == State.ROLLEDBACK) {
+                    return; // Already rolled back
+                }
+                if (state == State.DISCHARGING) {
+                    // Another thread is handling discharge, just mark for rollback
+                    return;
+                }
+                throw new IllegalStateException("Transaction not in DECLARED state: " + state);
             }
-            throw new IllegalStateException("Transaction not in DECLARED state: " + state);
+
+            state = State.DISCHARGING;
+            // Copy lists under lock to prevent concurrent modification
+            toRollbackPublishes = new ArrayList<>(publishedMessages);
+            toRollbackAcks = new ArrayList<>(acknowledgments);
         }
 
-        state = State.DISCHARGING;
         log.debug("Rolling back transaction {}: {} publishes, {} acks",
-                txnIdString, publishedMessages.size(), acknowledgments.size());
+                txnIdString, toRollbackPublishes.size(), toRollbackAcks.size());
 
-        rollbackInternal();
-        state = State.ROLLEDBACK;
+        rollbackInternal(toRollbackPublishes, toRollbackAcks);
+
+        synchronized (stateLock) {
+            state = State.ROLLEDBACK;
+        }
         log.debug("Transaction {} rolled back", txnIdString);
     }
 
     /**
      * Internal rollback implementation.
      */
-    private void rollbackInternal() {
+    private void rollbackInternal(List<TransactionalDelivery> publishes, List<TransactionalAck> acks) {
         // Rollback published messages (don't make them visible)
-        for (TransactionalDelivery delivery : publishedMessages) {
+        for (TransactionalDelivery delivery : publishes) {
             try {
                 delivery.rollback();
             } catch (Exception e) {
@@ -284,7 +349,7 @@ public class Transaction10 {
         }
 
         // Rollback acknowledgments (make messages available again)
-        for (TransactionalAck ack : acknowledgments) {
+        for (TransactionalAck ack : acks) {
             try {
                 ack.rollback();
             } catch (Exception e) {
@@ -294,17 +359,21 @@ public class Transaction10 {
     }
 
     /**
-     * Get the list of published deliveries.
+     * Get the list of published deliveries (returns a copy for thread safety).
      */
     public List<TransactionalDelivery> getPublishedMessages() {
-        return publishedMessages;
+        synchronized (stateLock) {
+            return new ArrayList<>(publishedMessages);
+        }
     }
 
     /**
-     * Get the list of acknowledgments.
+     * Get the list of acknowledgments (returns a copy for thread safety).
      */
     public List<TransactionalAck> getAcknowledgments() {
-        return acknowledgments;
+        synchronized (stateLock) {
+            return new ArrayList<>(acknowledgments);
+        }
     }
 
     /**

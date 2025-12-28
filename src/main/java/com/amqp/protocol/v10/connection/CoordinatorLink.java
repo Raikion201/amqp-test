@@ -237,15 +237,26 @@ public class CoordinatorLink extends Amqp10Link {
         return transactions;
     }
 
+    // Standard transaction error condition symbols per AMQP 1.0 spec
+    private static final Symbol TRANSACTION_UNKNOWN_ID = Symbol.valueOf("amqp:transaction:unknown-id");
+    private static final Symbol TRANSACTION_ROLLBACK = Symbol.valueOf("amqp:transaction:rollback");
+    private static final Symbol TRANSACTION_TIMEOUT = Symbol.valueOf("amqp:transaction:timeout");
+
     /**
      * Create a Rejected delivery state with error.
      */
     private Rejected createRejected(String description) {
+        Symbol errorSymbol;
+        if (description != null && description.contains("Unknown transaction")) {
+            errorSymbol = TRANSACTION_UNKNOWN_ID;
+        } else if (description != null && description.contains("timeout")) {
+            errorSymbol = TRANSACTION_TIMEOUT;
+        } else {
+            errorSymbol = TRANSACTION_ROLLBACK;
+        }
+
         Rejected rejected = new Rejected();
-        rejected.setError(new ErrorCondition(
-                Symbol.valueOf("amqp:transaction:error"),
-                description
-        ));
+        rejected.setError(new ErrorCondition(errorSymbol, description));
         return rejected;
     }
 

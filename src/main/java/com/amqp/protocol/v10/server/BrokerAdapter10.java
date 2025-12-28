@@ -64,6 +64,36 @@ public class BrokerAdapter10 {
                         return t;
                     });
 
+    // Register shutdown hook to clean up scheduler
+    static {
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            DELAYED_DELIVERY_SCHEDULER.shutdown();
+            try {
+                if (!DELAYED_DELIVERY_SCHEDULER.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                    DELAYED_DELIVERY_SCHEDULER.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                DELAYED_DELIVERY_SCHEDULER.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }, "amqp10-scheduler-shutdown"));
+    }
+
+    /**
+     * Shut down the shared scheduler. Call when broker is stopping.
+     */
+    public static void shutdownScheduler() {
+        DELAYED_DELIVERY_SCHEDULER.shutdown();
+        try {
+            if (!DELAYED_DELIVERY_SCHEDULER.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                DELAYED_DELIVERY_SCHEDULER.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            DELAYED_DELIVERY_SCHEDULER.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+    }
+
     public BrokerAdapter10(AmqpBroker broker, Amqp10Connection connection) {
         this.broker = broker;
         this.connection = connection;
@@ -269,13 +299,17 @@ public class BrokerAdapter10 {
     /**
      * Called when a message is received from client.
      */
-    public void onMessageReceived(Amqp10Session session, ReceiverLink link, Transfer transfer) {
+    public void onMessageReceived(Amqp10Session session, ReceiverLink link, Transfer transfer,
+                                   ReceiverLink.ReceiverDelivery completedDelivery) {
         String linkName = link.getName();
 
         try {
-            // Decode the message
+            // Use the message from completed delivery if available (for multi-frame messages)
+            // Otherwise decode from transfer payload (for single-frame messages)
             Message10 message10 = null;
-            if (transfer.getPayload() != null && transfer.getPayload().isReadable()) {
+            if (completedDelivery != null && completedDelivery.getMessage() != null) {
+                message10 = completedDelivery.getMessage();
+            } else if (transfer.getPayload() != null && transfer.getPayload().isReadable()) {
                 message10 = Message10.decode(transfer.getPayload().duplicate());
             }
 

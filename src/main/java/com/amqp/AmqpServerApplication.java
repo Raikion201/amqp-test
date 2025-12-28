@@ -39,8 +39,9 @@ public class AmqpServerApplication {
 
             AmqpBroker broker = new AmqpBroker(persistenceManager, enableGuestUser);
 
-            // Start AMQP 0-9-1 server
+            // Start AMQP 0-9-1 server (in background thread since start() blocks)
             AmqpServer server091 = null;
+            Thread server091Thread = null;
             if (config.enable091) {
                 if (config.sslEnabled) {
                     logger.info("AMQP 0-9-1 SSL/TLS enabled with cert: {}, key: {}", config.sslCertPath, config.sslKeyPath);
@@ -48,7 +49,18 @@ public class AmqpServerApplication {
                 } else {
                     server091 = new AmqpServer(config.port, broker);
                 }
-                server091.start();
+                final AmqpServer finalServer = server091;
+                server091Thread = new Thread(() -> {
+                    try {
+                        finalServer.start();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        logger.info("AMQP 0-9-1 server thread interrupted");
+                    }
+                }, "amqp-091-server");
+                server091Thread.start();
+                // Wait briefly for server to bind
+                Thread.sleep(500);
                 logger.info("AMQP 0-9-1 server started on port {}", config.port);
             }
 
@@ -65,6 +77,7 @@ public class AmqpServerApplication {
             // Capture references for shutdown hook
             final AmqpServer finalServer091 = server091;
             final Amqp10Server finalServer10 = server10;
+            final Thread finalServer091Thread = server091Thread;
 
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 logger.info("Shutting down AMQP Server...");
@@ -74,13 +87,16 @@ public class AmqpServerApplication {
                 if (finalServer10 != null) {
                     finalServer10.shutdown();
                 }
+                if (finalServer091Thread != null) {
+                    finalServer091Thread.interrupt();
+                }
                 databaseManager.close();
             }));
 
             // Keep main thread alive
-            if (server091 != null) {
-                // Block on 0-9-1 server
-                Thread.currentThread().join();
+            if (server091Thread != null) {
+                // Block on 0-9-1 server thread
+                server091Thread.join();
             } else if (server10 != null) {
                 // Block on 1.0 server
                 server10.awaitShutdown();

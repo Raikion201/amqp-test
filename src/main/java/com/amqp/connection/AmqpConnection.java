@@ -21,6 +21,11 @@ import java.util.concurrent.TimeUnit;
 public class AmqpConnection {
     private static final Logger logger = LoggerFactory.getLogger(AmqpConnection.class);
 
+    // Protocol compliance constants
+    public static final int DEFAULT_CHANNEL_MAX = 2047;  // Max channels per connection
+    public static final int DEFAULT_FRAME_MAX = 131072;   // 128KB default frame max
+    public static final int MIN_FRAME_MAX = 4096;         // Minimum frame size per spec
+
     private final Channel nettyChannel;
     private final AmqpBroker broker;
     private final ConcurrentMap<Short, AmqpChannel> channels;
@@ -29,6 +34,10 @@ public class AmqpConnection {
     private volatile String virtualHost = "/";
     private volatile String username;
     private volatile User user;
+
+    // Protocol negotiation values
+    private volatile int channelMax = DEFAULT_CHANNEL_MAX;
+    private volatile int frameMax = DEFAULT_FRAME_MAX;
 
     // Heartbeat tracking
     private volatile int heartbeatInterval = 0; // seconds, 0 = disabled
@@ -86,14 +95,28 @@ public class AmqpConnection {
     }
     
     public AmqpChannel openChannel(short channelNumber) {
+        // Protocol compliance: Enforce channel-max limit
+        if (channelNumber > channelMax) {
+            throw new IllegalArgumentException(
+                "Channel number " + channelNumber + " exceeds channel-max limit of " + channelMax);
+        }
+
+        // Check if we've hit the channel count limit
+        // Note: channel 0 is reserved for connection-level operations
+        int currentChannelCount = channels.size();
+        if (currentChannelCount >= channelMax) {
+            throw new IllegalStateException(
+                "Maximum channel count reached: " + channelMax + " channels already open");
+        }
+
         if (channels.containsKey(channelNumber)) {
             throw new IllegalArgumentException("Channel already exists: " + channelNumber);
         }
-        
+
         AmqpChannel channel = new AmqpChannel(channelNumber, this, broker);
         channels.put(channelNumber, channel);
-        
-        logger.debug("Opened channel: {}", channelNumber);
+
+        logger.debug("Opened channel: {} (total: {}/{})", channelNumber, channels.size(), channelMax);
         return channel;
     }
     
@@ -301,5 +324,60 @@ public class AmqpConnection {
     public void recordHeartbeatReceived() {
         lastHeartbeatReceived.set(System.currentTimeMillis());
         logger.trace("Received heartbeat from client");
+    }
+
+    /**
+     * Get the negotiated channel-max value.
+     */
+    public int getChannelMax() {
+        return channelMax;
+    }
+
+    /**
+     * Set the negotiated channel-max value.
+     * Called during Connection.Tune-Ok handling.
+     */
+    public void setChannelMax(int channelMax) {
+        // Use server's value if client sends 0 (meaning "use server's value")
+        if (channelMax == 0) {
+            this.channelMax = DEFAULT_CHANNEL_MAX;
+        } else {
+            // Use the minimum of client and server values per AMQP spec
+            this.channelMax = Math.min(channelMax, DEFAULT_CHANNEL_MAX);
+        }
+        logger.debug("Channel-max negotiated to: {}", this.channelMax);
+    }
+
+    /**
+     * Get the negotiated frame-max value.
+     */
+    public int getFrameMax() {
+        return frameMax;
+    }
+
+    /**
+     * Set the negotiated frame-max value.
+     * Called during Connection.Tune-Ok handling.
+     */
+    public void setFrameMax(int frameMax) {
+        // Use server's value if client sends 0 (meaning "unlimited" or "use server's value")
+        if (frameMax == 0) {
+            this.frameMax = DEFAULT_FRAME_MAX;
+        } else if (frameMax < MIN_FRAME_MAX) {
+            throw new IllegalArgumentException(
+                "Frame-max " + frameMax + " is below minimum required: " + MIN_FRAME_MAX);
+        } else {
+            // Use the minimum of client and server values per AMQP spec
+            this.frameMax = Math.min(frameMax, DEFAULT_FRAME_MAX);
+        }
+        logger.debug("Frame-max negotiated to: {}", this.frameMax);
+    }
+
+    /**
+     * Get the current number of open channels (excluding channel 0).
+     */
+    public int getOpenChannelCount() {
+        // Channel 0 is always present but is for connection-level operations
+        return Math.max(0, channels.size() - 1);
     }
 }

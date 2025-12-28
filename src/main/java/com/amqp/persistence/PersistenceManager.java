@@ -425,51 +425,54 @@ public class PersistenceManager {
         }
     }
     
+    /**
+     * Delete an exchange (without vhost - DEPRECATED, use deleteExchange(vhost, name) instead).
+     * @deprecated Use {@link #deleteExchange(String, String)} for proper vhost isolation
+     */
+    @Deprecated
     public void deleteExchange(String exchangeName) {
-        String sql = "DELETE FROM exchanges WHERE name = ?";
-        
+        // Default to "/" vhost for backwards compatibility
+        deleteExchange("/", exchangeName);
+    }
+
+    /**
+     * Delete an exchange with vhost support.
+     * SECURITY: Always use this method to ensure proper multi-tenancy isolation.
+     */
+    public void deleteExchange(String vhost, String exchangeName) {
+        String sql = "DELETE FROM exchanges WHERE vhost = ? AND name = ?";
+
         try (Connection conn = databaseManager.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql)) {
-            
-            stmt.setString(1, exchangeName);
-            stmt.executeUpdate();
-            logger.debug("Deleted exchange: {}", exchangeName);
-            
+
+            stmt.setString(1, vhost);
+            stmt.setString(2, exchangeName);
+            int deleted = stmt.executeUpdate();
+            logger.debug("Deleted exchange: {} in vhost: {} (rows affected: {})", exchangeName, vhost, deleted);
+
         } catch (SQLException e) {
-            logger.error("Failed to delete exchange: {}", exchangeName, e);
+            logger.error("Failed to delete exchange: {} in vhost: {}", exchangeName, vhost, e);
         }
     }
     
+    /**
+     * Delete a queue (without vhost - DEPRECATED, use deleteQueue(vhost, name) instead).
+     * @deprecated Use {@link #deleteQueue(String, String)} for proper vhost isolation
+     */
+    @Deprecated
     public void deleteQueue(String queueName) {
-        String sql = "DELETE FROM queues WHERE name = ?";
-        
-        try (Connection conn = databaseManager.getConnection();
-             PreparedStatement stmt = conn.prepareStatement(sql)) {
-            
-            stmt.setString(1, queueName);
-            stmt.executeUpdate();
-            logger.debug("Deleted queue: {}", queueName);
-            
-        } catch (SQLException e) {
-            logger.error("Failed to delete queue: {}", queueName, e);
-        }
+        // Default to "/" vhost for backwards compatibility
+        deleteQueue("/", queueName);
     }
-    
+
+    /**
+     * Delete a binding (without vhost - DEPRECATED, use deleteBinding(vhost, ...) instead).
+     * @deprecated Use {@link #deleteBinding(String, String, String, String)} for proper vhost isolation
+     */
+    @Deprecated
     public void deleteBinding(String exchangeName, String queueName, String routingKey) {
-        String sql = "DELETE FROM bindings WHERE exchange_name = ? AND queue_name = ? AND routing_key = ?";
-
-        try (Connection conn = databaseManager.getConnection();
-             PreparedStatement stmt = conn.prepareStatement(sql)) {
-
-            stmt.setString(1, exchangeName);
-            stmt.setString(2, queueName);
-            stmt.setString(3, routingKey);
-            stmt.executeUpdate();
-            logger.debug("Deleted binding: {} -> {} ({})", exchangeName, queueName, routingKey);
-
-        } catch (SQLException e) {
-            logger.error("Failed to delete binding: {} -> {}", exchangeName, queueName, e);
-        }
+        // Default to "/" vhost for backwards compatibility
+        deleteBinding("/", exchangeName, queueName, routingKey);
     }
 
     /**
