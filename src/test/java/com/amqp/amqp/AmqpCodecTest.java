@@ -635,6 +635,91 @@ class AmqpCodecTest {
     }
 
     @Nested
+    @DisplayName("Table Encoding/Decoding Tests")
+    class TableCodecTests {
+
+        @Test
+        @DisplayName("Should encode and decode empty table")
+        void testEmptyTable() {
+            ByteBuf buf = Unpooled.buffer();
+            java.util.Map<String, Object> original = new java.util.HashMap<>();
+
+            AmqpCodec.encodeTable(buf, original);
+            java.util.Map<String, Object> decoded = AmqpCodec.decodeTable(buf);
+
+            assertThat(decoded).isEmpty();
+        }
+
+        @Test
+        @DisplayName("Should encode and decode table with string value")
+        void testTableWithString() {
+            ByteBuf buf = Unpooled.buffer();
+            java.util.Map<String, Object> original = new java.util.HashMap<>();
+            original.put("x-custom", "value");
+
+            AmqpCodec.encodeTable(buf, original);
+            java.util.Map<String, Object> decoded = AmqpCodec.decodeTable(buf);
+
+            assertThat(decoded).containsEntry("x-custom", "value");
+        }
+
+        @Test
+        @DisplayName("Should encode and decode table with integer value")
+        void testTableWithInteger() {
+            ByteBuf buf = Unpooled.buffer();
+            java.util.Map<String, Object> original = new java.util.HashMap<>();
+            original.put("x-number", 42);
+
+            AmqpCodec.encodeTable(buf, original);
+            java.util.Map<String, Object> decoded = AmqpCodec.decodeTable(buf);
+
+            assertThat(decoded).containsEntry("x-number", 42);
+        }
+
+        @Test
+        @DisplayName("Should encode and decode table with multiple values")
+        void testTableWithMultipleValues() {
+            ByteBuf buf = Unpooled.buffer();
+            java.util.Map<String, Object> original = new java.util.HashMap<>();
+            original.put("x-custom", "value");
+            original.put("x-number", 42);
+            original.put("x-bool", true);
+
+            AmqpCodec.encodeTable(buf, original);
+            java.util.Map<String, Object> decoded = AmqpCodec.decodeTable(buf);
+
+            assertThat(decoded).hasSize(3);
+            assertThat(decoded).containsEntry("x-custom", "value");
+            assertThat(decoded).containsEntry("x-number", 42);
+            assertThat(decoded).containsEntry("x-bool", true);
+        }
+
+        @Test
+        @DisplayName("Should encode and decode null table")
+        void testNullTable() {
+            ByteBuf buf = Unpooled.buffer();
+
+            AmqpCodec.encodeTable(buf, null);
+            java.util.Map<String, Object> decoded = AmqpCodec.decodeTable(buf);
+
+            assertThat(decoded).isEmpty();
+        }
+
+        @Test
+        @DisplayName("Should encode and decode table with long value")
+        void testTableWithLong() {
+            ByteBuf buf = Unpooled.buffer();
+            java.util.Map<String, Object> original = new java.util.HashMap<>();
+            original.put("x-long", 9999999999L);
+
+            AmqpCodec.encodeTable(buf, original);
+            java.util.Map<String, Object> decoded = AmqpCodec.decodeTable(buf);
+
+            assertThat(decoded).containsEntry("x-long", 9999999999L);
+        }
+    }
+
+    @Nested
     @DisplayName("Integration Tests")
     class IntegrationTests {
 

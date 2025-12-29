@@ -321,6 +321,7 @@ public class MessageDeliveryService {
             Short priority = message.getPriority();
             Long timestamp = message.getTimestamp();
             java.util.Map<String, Object> headers = message.getHeaders();
+            logger.debug("Delivering message to consumer, headers: {} (size={})", headers, headers != null ? headers.size() : 0);
 
             if (message.getContentType() != null) propertyFlags |= (1 << 15);
             if (message.getContentEncoding() != null) propertyFlags |= (1 << 14);

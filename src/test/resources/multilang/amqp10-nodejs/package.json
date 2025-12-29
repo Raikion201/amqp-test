@@ -1,0 +1,12 @@
+{
+  "name": "amqp10-nodejs-tests",
+  "version": "1.0.0",
+  "description": "AMQP 1.0 compliance tests using rhea",
+  "main": "run_tests.js",
+  "scripts": {
+    "test": "node run_tests.js"
+  },
+  "dependencies": {
+    "rhea": "^3.0.2"
+  }
+}

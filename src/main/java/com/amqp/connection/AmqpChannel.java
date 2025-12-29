@@ -1143,6 +1143,7 @@ public class AmqpChannel {
             // headers table - decode the table
             java.util.Map<String, Object> headers = AmqpCodec.decodeTable(payload);
             message.setHeaders(headers);
+            logger.debug("Decoded headers from publish: {} (size={})", headers, headers != null ? headers.size() : 0);
         }
         if ((propertyFlags & (1 << 12)) != 0) {
             message.setDeliveryMode(payload.readByte());

@@ -1,0 +1,97 @@
+version: '3.8'
+
+# Docker Compose for running all AMQP compliance tests
+#
+# Usage:
+#   docker-compose up --build
+#
+# Or run specific test suites:
+#   docker-compose up python-amqp091
+#   docker-compose up nodejs-amqp10
+
+services:
+  # ============================================
+  # AMQP 0-9-1 Tests
+  # ============================================
+
+  python-amqp091:
+    build:
+      context: ./python
+      dockerfile: Dockerfile
+    environment:
+      - AMQP_HOST=${AMQP_HOST:-host.docker.internal}
+      - AMQP_PORT=${AMQP_PORT:-5672}
+      - AMQP_USER=${AMQP_USER:-guest}
+      - AMQP_PASS=${AMQP_PASS:-guest}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    network_mode: bridge
+
+  nodejs-amqp091:
+    build:
+      context: ./nodejs
+      dockerfile: Dockerfile
+    environment:
+      - AMQP_HOST=${AMQP_HOST:-host.docker.internal}
+      - AMQP_PORT=${AMQP_PORT:-5672}
+      - AMQP_USER=${AMQP_USER:-guest}
+      - AMQP_PASS=${AMQP_PASS:-guest}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    network_mode: bridge
+
+  go-amqp091:
+    build:
+      context: ./go
+      dockerfile: Dockerfile
+    environment:
+      - AMQP_HOST=${AMQP_HOST:-host.docker.internal}
+      - AMQP_PORT=${AMQP_PORT:-5672}
+      - AMQP_USER=${AMQP_USER:-guest}
+      - AMQP_PASS=${AMQP_PASS:-guest}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    network_mode: bridge
+
+  # ============================================
+  # AMQP 1.0 Tests
+  # ============================================
+
+  nodejs-amqp10:
+    build:
+      context: ./amqp10-nodejs
+      dockerfile: Dockerfile
+    environment:
+      - AMQP_HOST=${AMQP_HOST:-host.docker.internal}
+      - AMQP_PORT=${AMQP_PORT:-5672}
+      - AMQP_USER=${AMQP_USER:-guest}
+      - AMQP_PASS=${AMQP_PASS:-guest}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    network_mode: bridge
+
+  python-amqp10:
+    build:
+      context: ./amqp10-python
+      dockerfile: Dockerfile
+    environment:
+      - AMQP_HOST=${AMQP_HOST:-host.docker.internal}
+      - AMQP_PORT=${AMQP_PORT:-5672}
+      - AMQP_USER=${AMQP_USER:-guest}
+      - AMQP_PASS=${AMQP_PASS:-guest}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    network_mode: bridge
+
+  go-amqp10:
+    build:
+      context: ./amqp10-go
+      dockerfile: Dockerfile
+    environment:
+      - AMQP_HOST=${AMQP_HOST:-host.docker.internal}
+      - AMQP_PORT=${AMQP_PORT:-5672}
+      - AMQP_USER=${AMQP_USER:-guest}
+      - AMQP_PASS=${AMQP_PASS:-guest}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    network_mode: bridge
