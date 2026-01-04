@@ -58,11 +58,11 @@ public class TypeDecoder {
             case AmqpType.FormatCode.SMALL_UINT:
                 return (long) (buffer.readByte() & 0xFF);
             case AmqpType.FormatCode.ULONG:
-                return buffer.readLong(); // Treat as signed for Java
+                return ULong.valueOf(buffer.readLong()); // Return ULong to preserve unsigned type
             case AmqpType.FormatCode.ULONG_0:
-                return 0L;
+                return ULong.ZERO;
             case AmqpType.FormatCode.SMALL_ULONG:
-                return (long) (buffer.readByte() & 0xFF);
+                return ULong.valueOf(buffer.readByte() & 0xFFL);
 
             // Signed integers
             case AmqpType.FormatCode.BYTE:

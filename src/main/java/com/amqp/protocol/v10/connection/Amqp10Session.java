@@ -167,7 +167,8 @@ public class Amqp10Session {
 
         // If it's a link flow, forward to the link
         if (flow.isLinkFlow()) {
-            Amqp10Link link = links.get(flow.getHandle());
+            // Flow from client uses client's handle (remote handle from our perspective)
+            Amqp10Link link = getLinkByRemoteHandle(flow.getHandle());
             if (link != null) {
                 link.onFlowReceived(flow);
             } else {

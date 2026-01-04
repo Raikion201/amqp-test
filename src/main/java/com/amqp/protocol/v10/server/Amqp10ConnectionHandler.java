@@ -15,8 +15,11 @@ import com.amqp.server.AmqpBroker;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.*;
 import io.netty.handler.timeout.IdleStateEvent;
+import io.netty.handler.timeout.IdleStateHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.concurrent.TimeUnit;
 
 /**
  * AMQP 1.0 Connection Handler.
@@ -181,9 +184,45 @@ public class Amqp10ConnectionHandler extends ChannelInboundHandlerAdapter {
         sendPerformative(ctx, 0, response);
         connection.onOpenSent();
 
+        // Reconfigure idle handler based on client's idle timeout
+        // We need to send heartbeats at least every (client_idle_timeout / 2) to keep connection alive
+        if (open.getIdleTimeout() > 0) {
+            long clientIdleTimeout = open.getIdleTimeout();
+            // Send heartbeats at half the client's idle timeout to be safe
+            long heartbeatInterval = clientIdleTimeout / 2;
+            if (heartbeatInterval < 1000) {
+                heartbeatInterval = 1000; // Minimum 1 second
+            }
+            reconfigureIdleHandler(ctx, heartbeatInterval);
+            log.debug("Configured heartbeat interval to {}ms based on client idle timeout {}ms",
+                    heartbeatInterval, clientIdleTimeout);
+        }
+
         log.info("AMQP 1.0 connection opened: {} <-> {} (user: {})",
                 connection.getContainerId(), connection.getRemoteContainerId(),
                 authenticatedUser != null ? authenticatedUser : "anonymous");
+    }
+
+    /**
+     * Reconfigure the idle handler with a new heartbeat interval.
+     */
+    private void reconfigureIdleHandler(ChannelHandlerContext ctx, long heartbeatIntervalMs) {
+        ChannelPipeline pipeline = ctx.pipeline();
+        ChannelHandler existingHandler = pipeline.get("idle");
+        if (existingHandler != null) {
+            pipeline.remove("idle");
+        }
+        // Add new idle handler: readerIdleTime=0 (we handle read timeouts differently),
+        // writerIdleTime=heartbeatInterval (trigger heartbeat when we haven't written)
+        // Add before this handler (which is named "handler") to ensure it's in the right position
+        try {
+            pipeline.addBefore(ctx.name(), "idle", new IdleStateHandler(
+                    0, heartbeatIntervalMs, 0, TimeUnit.MILLISECONDS));
+        } catch (Exception e) {
+            // Fallback: add as first handler
+            pipeline.addFirst("idle", new IdleStateHandler(
+                    0, heartbeatIntervalMs, 0, TimeUnit.MILLISECONDS));
+        }
     }
 
     private void handleBegin(ChannelHandlerContext ctx, int channel, Begin begin) {

@@ -3,6 +3,7 @@ package com.amqp.protocol.v10.transport;
 import com.amqp.protocol.v10.types.AmqpType;
 import com.amqp.protocol.v10.types.DescribedType;
 import com.amqp.protocol.v10.types.TypeDecoder;
+import com.amqp.protocol.v10.types.UInt;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -37,7 +38,8 @@ public class Detach implements Performative {
     @Override
     public List<Object> getFields() {
         List<Object> fields = new ArrayList<>();
-        fields.add(handle);
+        // Handle must be encoded as uint (AMQP spec requirement)
+        fields.add(UInt.valueOf(handle));
         fields.add(closed);
         fields.add(error != null ? error.toDescribed() : null);
 

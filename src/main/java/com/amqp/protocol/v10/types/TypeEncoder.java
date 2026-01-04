@@ -25,6 +25,16 @@ public class TypeEncoder {
             encodeUshort(((UShort) value).intValue(), buffer);
         } else if (value instanceof UInt) {
             encodeUint(((UInt) value).longValue(), buffer);
+        } else if (isProtonUnsignedType(value, "UnsignedByte")) {
+            encodeUbyte(((Number) value).intValue(), buffer);
+        } else if (isProtonUnsignedType(value, "UnsignedShort")) {
+            encodeUshort(((Number) value).intValue(), buffer);
+        } else if (isProtonUnsignedType(value, "UnsignedInteger")) {
+            encodeUint(((Number) value).longValue(), buffer);
+        } else if (isProtonUnsignedType(value, "UnsignedLong")) {
+            encodeUlong(((Number) value).longValue(), buffer);
+        } else if (value instanceof ULong) {
+            encodeUlong(((ULong) value).longValue(), buffer);
         } else if (value instanceof Byte) {
             encodeByte((Byte) value, buffer);
         } else if (value instanceof Short) {
@@ -364,6 +374,16 @@ public class TypeEncoder {
         buffer.writeByte(AmqpType.FormatCode.DESCRIBED);
         encodeUlong(descriptor, buffer);
         encodeList(fields, buffer);
+    }
+
+    /**
+     * Check if the value is a Proton unsigned type by class name.
+     * This avoids compile-time dependency on the Proton library.
+     */
+    private static boolean isProtonUnsignedType(Object value, String typeName) {
+        if (value == null) return false;
+        String className = value.getClass().getSimpleName();
+        return className.equals(typeName);
     }
 
     /**

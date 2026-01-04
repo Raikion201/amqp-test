@@ -45,6 +45,22 @@ public class BrokerAdapter10 {
     // Consumer tracking - SenderLinks that send messages to clients (consuming from queues)
     private final Map<String, SenderLink> activeConsumers = new ConcurrentHashMap<>();
 
+    // Queue to consumers mapping - for triggering delivery when messages are published
+    private final Map<String, java.util.List<ConsumerInfo>> queueConsumers = new ConcurrentHashMap<>();
+
+    // Consumer info for triggering delivery
+    private static class ConsumerInfo {
+        final Amqp10Session session;
+        final SenderLink link;
+        final String queueName;
+
+        ConsumerInfo(Amqp10Session session, SenderLink link, String queueName) {
+            this.session = session;
+            this.link = link;
+            this.queueName = queueName;
+        }
+    }
+
     // Transaction tracking - messages staged for transactional commit
     private final Map<String, List<StagedMessage>> stagedMessages = new ConcurrentHashMap<>();
     private final Map<String, List<StagedAck>> stagedAcks = new ConcurrentHashMap<>();
@@ -115,6 +131,20 @@ public class BrokerAdapter10 {
         String address = getAddress(link);
 
         if (address == null || address.isEmpty()) {
+            // Check if this is a dynamic target (no address but dynamic=true)
+            if (link.isReceiver() && link.getTarget() != null &&
+                Boolean.TRUE.equals(link.getTarget().getDynamic())) {
+                // Dynamic target - continue to setupReceiverLink which will create the queue
+                setupReceiverLink(session, (ReceiverLink) link, null);
+                return;
+            }
+            // Check if this is a dynamic source (no address but dynamic=true)
+            if (link.isSender() && link.getSource() != null &&
+                Boolean.TRUE.equals(link.getSource().getDynamic())) {
+                // Dynamic source - continue to setupSenderLink which will create the queue
+                setupSenderLink(session, (SenderLink) link, null);
+                return;
+            }
             // Check if this is an anonymous relay link (receiver with null target)
             if (link.isReceiver()) {
                 setupAnonymousRelayLink(session, (ReceiverLink) link);
@@ -239,12 +269,37 @@ public class BrokerAdapter10 {
     }
 
     private String getAddress(Amqp10Link link) {
+        String address = null;
         if (link.isSender() && link.getSource() != null) {
-            return link.getSource().getAddress();
+            address = link.getSource().getAddress();
         } else if (link.isReceiver() && link.getTarget() != null) {
-            return link.getTarget().getAddress();
+            address = link.getTarget().getAddress();
         }
-        return null;
+        return normalizeAddress(address);
+    }
+
+    /**
+     * Normalize an address by stripping JMS-style prefixes.
+     * Handles prefixes like "topic://", "queue://", "temp-queue://", etc.
+     */
+    private String normalizeAddress(String address) {
+        if (address == null) {
+            return null;
+        }
+        // Strip JMS-style destination prefixes
+        if (address.startsWith("topic://")) {
+            return address.substring(8);
+        }
+        if (address.startsWith("queue://")) {
+            return address.substring(8);
+        }
+        if (address.startsWith("temp-queue://")) {
+            return address.substring(13);
+        }
+        if (address.startsWith("temp-topic://")) {
+            return address.substring(13);
+        }
+        return address;
     }
 
     /**
@@ -253,9 +308,16 @@ public class BrokerAdapter10 {
     public void onLinkDetached(Amqp10Session session, Amqp10Link link) {
         log.debug("Link '{}' detached", link.getName());
 
+        // Get queue name before removing from map
+        String queueName = linkToQueue.get(link.getName());
+
         if (link.isSender()) {
             // Cancel consumer
-            activeConsumers.remove(link.getName());
+            if (queueName != null) {
+                unregisterConsumer((SenderLink) link, queueName);
+            } else {
+                activeConsumers.remove(link.getName());
+            }
         }
 
         // Clean up dynamic queue if this link created one
@@ -481,33 +543,56 @@ public class BrokerAdapter10 {
         Message message = new Message();
 
         // Extract body and preserve body type
-        byte[] body = message10.getBodyAsBytes();
-        if (body != null) {
-            message.setBody(body);
-        } else {
-            String bodyStr = message10.getBodyAsString();
-            if (bodyStr != null) {
-                message.setBody(bodyStr.getBytes());
-            }
-        }
-
-        // Preserve AMQP 1.0 body type
         if (message10.isDataBody()) {
             message.setBodyType(Message.BodyType.DATA);
+            byte[] body = message10.getBodyAsBytes();
+            if (body != null) {
+                message.setBody(body);
+            }
         } else if (message10.isAmqpValueBody()) {
             message.setBodyType(Message.BodyType.AMQP_VALUE);
+            // Preserve the typed value for Maps, Lists, and other complex types
+            MessageSection firstBody = message10.getFirstBody();
+            if (firstBody instanceof AmqpValue) {
+                Object typedValue = ((AmqpValue) firstBody).getValue();
+                message.setAmqpValueTyped(typedValue);
+                // Also set bytes for string values (for compatibility)
+                if (typedValue instanceof String) {
+                    message.setBody(((String) typedValue).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                } else if (typedValue instanceof byte[]) {
+                    message.setBody((byte[]) typedValue);
+                }
+            }
         } else if (message10.isAmqpSequenceBody()) {
             message.setBodyType(Message.BodyType.AMQP_SEQUENCE);
+            // Preserve the sequence value
+            MessageSection firstBody = message10.getFirstBody();
+            if (firstBody instanceof AmqpSequence) {
+                message.setAmqpValueTyped(((AmqpSequence) firstBody).getValue());
+            }
+        } else {
+            // Fallback for unknown body types
+            byte[] body = message10.getBodyAsBytes();
+            if (body != null) {
+                message.setBody(body);
+            } else {
+                String bodyStr = message10.getBodyAsString();
+                if (bodyStr != null) {
+                    message.setBody(bodyStr.getBytes());
+                }
+            }
         }
 
         // Copy properties
         Properties props = message10.getProperties();
         if (props != null) {
             if (props.getMessageId() != null) {
-                message.setMessageId(props.getMessageIdAsString());
+                // Preserve the original typed messageId for AMQP 1.0
+                message.setMessageIdTyped(props.getMessageId());
             }
             if (props.getCorrelationId() != null) {
-                message.setCorrelationId(props.getCorrelationIdAsString());
+                // Preserve the original typed correlationId for AMQP 1.0
+                message.setCorrelationIdTyped(props.getCorrelationId());
             }
             if (props.getContentType() != null) {
                 message.setContentType(props.getContentTypeAsString());
@@ -600,8 +685,26 @@ public class BrokerAdapter10 {
             queue.enqueue(message);
             log.debug("Published message to queue '{}', queue@{}, size after enqueue: {}",
                     queueName, System.identityHashCode(queue), queue.size());
+
+            // Trigger delivery to any waiting consumers
+            triggerDelivery(queueName);
         } else {
             log.warn("Queue '{}' not found for publishing", queueName);
+        }
+    }
+
+    /**
+     * Trigger message delivery to consumers waiting on a queue.
+     * Called after a message is published to wake up waiting consumers.
+     */
+    private void triggerDelivery(String queueName) {
+        java.util.List<ConsumerInfo> consumers = queueConsumers.get(queueName);
+        if (consumers != null && !consumers.isEmpty()) {
+            for (ConsumerInfo consumer : consumers) {
+                if (consumer.link.hasCredit() && consumer.link.isAttached()) {
+                    deliverMessages(consumer.session, consumer.link, queueName);
+                }
+            }
         }
     }
 
@@ -609,8 +712,25 @@ public class BrokerAdapter10 {
         // Store reference for message delivery
         activeConsumers.put(link.getName(), link);
 
+        // Track consumer by queue for delivery triggering
+        queueConsumers.computeIfAbsent(queueName, k -> new java.util.concurrent.CopyOnWriteArrayList<>())
+                      .add(new ConsumerInfo(session, link, queueName));
+
         // Start delivering messages when credit is available
         log.debug("Registered consumer on queue '{}' for link '{}'", queueName, link.getName());
+    }
+
+    private void unregisterConsumer(SenderLink link, String queueName) {
+        activeConsumers.remove(link.getName());
+
+        // Remove from queue consumers
+        java.util.List<ConsumerInfo> consumers = queueConsumers.get(queueName);
+        if (consumers != null) {
+            consumers.removeIf(c -> c.link == link);
+            if (consumers.isEmpty()) {
+                queueConsumers.remove(queueName);
+            }
+        }
     }
 
     private void deliverMessages(Amqp10Session session, SenderLink link, String queueName) {
@@ -748,19 +868,39 @@ public class BrokerAdapter10 {
     private Message10 convertToAmqp10Message(Message message) {
         Message10 message10 = new Message10();
 
-        // Set body - preserve the original body type
-        byte[] body = message.getBody();
-        if (body != null) {
-            Message.BodyType bodyType = message.getBodyType();
-            if (bodyType == Message.BodyType.AMQP_VALUE) {
-                // Convert bytes back to string for AmqpValue
-                String text = new String(body, java.nio.charset.StandardCharsets.UTF_8);
-                message10.setBody(new AmqpValue(text));
-            } else if (bodyType == Message.BodyType.AMQP_SEQUENCE) {
-                // AmqpSequence - just use Data for now as sequence conversion is complex
-                message10.setBody(new Data(body));
+        // Set body - preserve the original body type and typed values
+        Message.BodyType bodyType = message.getBodyType();
+        Object typedValue = message.getAmqpValueTyped();
+
+        if (bodyType == Message.BodyType.AMQP_VALUE) {
+            // Use typed value if available (preserves Map, List, etc.)
+            if (typedValue != null) {
+                message10.setBody(new AmqpValue(typedValue));
             } else {
-                // Default to Data (preserves binary content)
+                // Fallback to bytes converted to string
+                byte[] body = message.getBody();
+                if (body != null) {
+                    String text = new String(body, java.nio.charset.StandardCharsets.UTF_8);
+                    message10.setBody(new AmqpValue(text));
+                }
+            }
+        } else if (bodyType == Message.BodyType.AMQP_SEQUENCE) {
+            // Use typed value if available (preserves the sequence List)
+            if (typedValue instanceof java.util.List) {
+                @SuppressWarnings("unchecked")
+                java.util.List<Object> seqList = (java.util.List<Object>) typedValue;
+                message10.setBody(new AmqpSequence(seqList));
+            } else {
+                // Fallback to Data
+                byte[] body = message.getBody();
+                if (body != null) {
+                    message10.setBody(new Data(body));
+                }
+            }
+        } else {
+            // Default to Data (preserves binary content)
+            byte[] body = message.getBody();
+            if (body != null) {
                 message10.setBody(new Data(body));
             }
         }
@@ -775,10 +915,16 @@ public class BrokerAdapter10 {
 
         // Set properties
         Properties props = new Properties();
-        if (message.getMessageId() != null) {
+        // Use typed messageId if available (preserves UUID, UnsignedLong, Binary types)
+        if (message.getMessageIdTyped() != null) {
+            props.setMessageId(message.getMessageIdTyped());
+        } else if (message.getMessageId() != null) {
             props.setMessageId(message.getMessageId());
         }
-        if (message.getCorrelationId() != null) {
+        // Use typed correlationId if available (preserves UUID, UnsignedLong, Binary types)
+        if (message.getCorrelationIdTyped() != null) {
+            props.setCorrelationId(message.getCorrelationIdTyped());
+        } else if (message.getCorrelationId() != null) {
             props.setCorrelationId(message.getCorrelationId());
         }
         if (message.getContentType() != null) {
@@ -949,10 +1095,48 @@ public class BrokerAdapter10 {
         else if (isAcceptedState(state)) {
             log.debug("Message accepted by receiver on link '{}'", link.getName());
         }
+        // For Modified with delivery-failed=true, requeue the message
+        else if (isModifiedState(state)) {
+            String queueName = delivery.getQueueName();
+            Object internalMsg = delivery.getInternalMessage();
+
+            log.debug("Modified state detected: queueName={}, internalMsg={}",
+                    queueName, internalMsg != null ? internalMsg.getClass().getName() : "null");
+
+            if (queueName != null && internalMsg instanceof Message) {
+                Message message = (Message) internalMsg;
+                Queue queue = broker.getQueue(queueName);
+                if (queue != null) {
+                    queue.enqueue(message);
+                    log.info("Modified message requeued to queue '{}'", queueName);
+                    // Trigger delivery to waiting consumers
+                    triggerDelivery(queueName);
+                } else {
+                    log.warn("Cannot requeue Modified message - queue '{}' not found", queueName);
+                }
+            }
+        }
         // For Rejected, we could dead-letter the message, but for now just log
         else if (isRejectedState(state)) {
             log.debug("Message rejected by receiver on link '{}', discarding", link.getName());
         }
+    }
+
+    private boolean isModifiedState(Object state) {
+        if (state == null) return false;
+        // Check class name (works for both our Modified and Proton's Modified)
+        String className = state.getClass().getSimpleName();
+        if (className.equals("Modified")) return true;
+        // Check for DescribedType with Modified descriptor (0x27)
+        if (state instanceof com.amqp.protocol.v10.types.DescribedType) {
+            com.amqp.protocol.v10.types.DescribedType described =
+                (com.amqp.protocol.v10.types.DescribedType) state;
+            Object descriptor = described.getDescriptor();
+            if (descriptor instanceof Number) {
+                return ((Number) descriptor).longValue() == 0x0000000000000027L;
+            }
+        }
+        return false;
     }
 
     private boolean isReleasedState(Object state) {

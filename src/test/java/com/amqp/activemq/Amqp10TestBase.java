@@ -33,7 +33,7 @@ public abstract class Amqp10TestBase {
 
     protected static final Logger log = LoggerFactory.getLogger(Amqp10TestBase.class);
 
-    protected static final int TEST_PORT = 15672;
+    protected static int TEST_PORT;
     protected static final String TEST_HOST = "localhost";
     protected static final int TIMEOUT_SECONDS = 30;
 
@@ -41,12 +41,27 @@ public abstract class Amqp10TestBase {
     protected static AmqpBroker broker;
     protected static Vertx vertx;
 
+    /**
+     * Find an available port dynamically.
+     */
+    protected static int findAvailablePort() {
+        try (java.net.ServerSocket socket = new java.net.ServerSocket(0)) {
+            socket.setReuseAddress(true);
+            return socket.getLocalPort();
+        } catch (Exception e) {
+            // Fallback to a random port in the dynamic range
+            return 49152 + (int) (Math.random() * 16383);
+        }
+    }
+
     @BeforeAll
     static void startServer() throws Exception {
         log.info("=== Starting AMQP 1.0 Test Server ===");
 
+        TEST_PORT = findAvailablePort();
+
         DatabaseManager dbManager = new DatabaseManager(
-                "jdbc:h2:mem:amqp10activemqtest;DB_CLOSE_DELAY=-1;DATABASE_TO_UPPER=false",
+                "jdbc:h2:mem:amqp10activemqtest" + TEST_PORT + ";DB_CLOSE_DELAY=-1;DATABASE_TO_UPPER=false",
                 "sa", "");
 
         PersistenceManager persistence = new PersistenceManager(dbManager);
@@ -55,6 +70,15 @@ public abstract class Amqp10TestBase {
         server = new Amqp10Server(broker, TEST_PORT);
         server.setRequireSasl(false);
         server.setMaxFrameSize(1024 * 1024); // 1MB frame size for testing
+
+        // Use high-throughput config for tests
+        com.amqp.protocol.v10.security.Amqp10SecurityConfig testConfig =
+            com.amqp.protocol.v10.security.Amqp10SecurityConfig.development();
+        testConfig.setConnectionRateLimitPerSecond(1000); // High rate for tests
+        testConfig.setMaxConnectionsPerHost(1000);
+        testConfig.setMaxTotalConnections(10000);
+        server.setSecurityConfig(testConfig);
+
         server.start();
 
         vertx = Vertx.vertx();
@@ -67,13 +91,34 @@ public abstract class Amqp10TestBase {
         log.info("=== Stopping AMQP 1.0 Test Server ===");
 
         if (vertx != null) {
-            vertx.close();
+            try {
+                vertx.close();
+            } catch (Exception e) {
+                log.warn("Error closing vertx", e);
+            }
+            vertx = null;
         }
         if (server != null) {
-            server.shutdown();
+            try {
+                server.shutdown();
+            } catch (Exception e) {
+                log.warn("Error shutting down server", e);
+            }
+            server = null;
         }
         if (broker != null) {
-            broker.stop();
+            try {
+                broker.stop();
+            } catch (Exception e) {
+                log.warn("Error stopping broker", e);
+            }
+            broker = null;
+        }
+
+        // Wait a bit for port to be released
+        try {
+            Thread.sleep(100);
+        } catch (InterruptedException ignored) {
         }
 
         log.info("AMQP 1.0 Test Server stopped");

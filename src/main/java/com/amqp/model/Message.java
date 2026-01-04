@@ -23,9 +23,11 @@ public class Message {
     private short deliveryMode = 1;
     private short priority = 0;
     private String correlationId;
+    private Object correlationIdTyped; // For AMQP 1.0 type preservation (UUID, UnsignedLong, Binary)
     private String replyTo;
     private String expiration;
     private String messageId;
+    private Object messageIdTyped; // For AMQP 1.0 type preservation (UUID, UnsignedLong, Binary)
     private long timestamp;
     private String type;
     private String userId;
@@ -33,6 +35,7 @@ public class Message {
     private String clusterId;
     private byte[] body;
     private BodyType bodyType = BodyType.DATA; // Default to Data for AMQP 0-9-1 compatibility
+    private Object amqpValueTyped; // For AMQP 1.0: stores the original typed value (Map, List, etc.)
     private String subject; // AMQP 1.0 subject property
     private Long ttl; // Time-to-live in milliseconds (from AMQP 1.0 Header)
     private Long absoluteExpiryTime; // Absolute expiry time in milliseconds since epoch (from AMQP 1.0 Properties)
@@ -115,6 +118,18 @@ public class Message {
     public void setCorrelationId(String correlationId) {
         this.correlationId = correlationId;
     }
+
+    public Object getCorrelationIdTyped() {
+        return correlationIdTyped;
+    }
+
+    public void setCorrelationIdTyped(Object correlationIdTyped) {
+        this.correlationIdTyped = correlationIdTyped;
+        // Also set string version for compatibility
+        if (correlationIdTyped != null) {
+            this.correlationId = correlationIdTyped.toString();
+        }
+    }
     
     public String getReplyTo() {
         return replyTo;
@@ -138,6 +153,18 @@ public class Message {
     
     public void setMessageId(String messageId) {
         this.messageId = messageId;
+    }
+
+    public Object getMessageIdTyped() {
+        return messageIdTyped;
+    }
+
+    public void setMessageIdTyped(Object messageIdTyped) {
+        this.messageIdTyped = messageIdTyped;
+        // Also set string version for compatibility
+        if (messageIdTyped != null) {
+            this.messageId = messageIdTyped.toString();
+        }
     }
     
     public long getTimestamp() {
@@ -194,6 +221,14 @@ public class Message {
 
     public void setBodyType(BodyType bodyType) {
         this.bodyType = bodyType;
+    }
+
+    public Object getAmqpValueTyped() {
+        return amqpValueTyped;
+    }
+
+    public void setAmqpValueTyped(Object amqpValueTyped) {
+        this.amqpValueTyped = amqpValueTyped;
     }
 
     public String getSubject() {
